@@ -780,7 +780,7 @@ fn normalize_notes_folder_path(path: &str) -> Result<PathBuf, String> {
 }
 
 /// Shared initialization logic for setting a notes folder.
-/// Creates required directories, verifies write access, updates config/settings,
+/// Creates the assets directory, verifies write access, updates config/settings,
 /// adds asset protocol scope, and rebuilds the search index.
 fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState) -> Result<String, String> {
     let normalized_path = path_buf.to_string_lossy().into_owned();
@@ -794,15 +794,11 @@ fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState
     let assets = path_buf.join("assets");
     std::fs::create_dir_all(&assets).map_err(|e| e.to_string())?;
 
-    // Create .scratch config folder
-    let scratch_dir = path_buf.join(".scratch");
-    std::fs::create_dir_all(&scratch_dir).map_err(|e| e.to_string())?;
-
-    // Verify write access early to avoid later silent failures
-    let write_test_path = scratch_dir.join(".write-test");
-    std::fs::write(&write_test_path, b"ok")
-        .map_err(|e| format!("Notes folder is not writable: {}", e))?;
-    let _ = std::fs::remove_file(&write_test_path);
+    // Verify write access early to avoid later silent failures (without writing files)
+    let metadata = std::fs::metadata(path_buf).map_err(|e| e.to_string())?;
+    if metadata.permissions().readonly() {
+        return Err("Notes folder is not writable".to_string());
+    }
 
     // Load global + folder settings (folder part starts with defaults if none exist)
     let settings = storage::load(&state.app_data_dir, Some(&normalized_path));
