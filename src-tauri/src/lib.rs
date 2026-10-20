@@ -17,6 +17,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 mod git;
+mod storage;
 
 // Note metadata for list display
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -102,7 +103,8 @@ pub struct AppConfig {
     pub notes_folder: Option<String>,
 }
 
-// Per-folder settings (stored in .scratch/settings.json within notes folder)
+// App settings. Persisted by the `storage` module: app-wide fields in the app data
+// directory, folder-specific fields in a per-folder file (also in the app data directory).
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct Settings {
     pub theme: ThemeSettings,
@@ -335,7 +337,8 @@ impl SearchIndex {
 // App state with improved structure
 pub struct AppState {
     pub app_config: RwLock<AppConfig>,  // notes_folder path (stored in app data)
-    pub settings: RwLock<Settings>,      // per-folder settings (stored in .scratch/)
+    pub settings: RwLock<Settings>,      // global + current folder settings (see storage.rs)
+    pub app_data_dir: PathBuf,
     pub notes_cache: RwLock<HashMap<String, NoteMetadata>>,
     pub file_watcher: Mutex<Option<FileWatcherState>>,
     pub search_index: Mutex<Option<SearchIndex>>,
@@ -347,6 +350,7 @@ impl Default for AppState {
         Self {
             app_config: RwLock::new(AppConfig::default()),
             settings: RwLock::new(Settings::default()),
+            app_data_dir: PathBuf::new(),
             notes_cache: RwLock::new(HashMap::new()),
             file_watcher: Mutex::new(None),
             search_index: Mutex::new(None),
@@ -718,13 +722,6 @@ fn get_app_config_path(app: &AppHandle) -> Result<PathBuf> {
     Ok(app_data.join("config.json"))
 }
 
-// Get per-folder settings file path (in .scratch/ within notes folder)
-fn get_settings_path(notes_folder: &str) -> PathBuf {
-    let scratch_dir = PathBuf::from(notes_folder).join(".scratch");
-    std::fs::create_dir_all(&scratch_dir).ok();
-    scratch_dir.join("settings.json")
-}
-
 // Get search index path
 fn get_search_index_path(app: &AppHandle) -> Result<PathBuf> {
     let app_data = app.path().app_data_dir()?;
@@ -753,28 +750,6 @@ fn load_app_config(app: &AppHandle) -> AppConfig {
 fn save_app_config(app: &AppHandle, config: &AppConfig) -> Result<()> {
     let path = get_app_config_path(app)?;
     let content = serde_json::to_string_pretty(config)?;
-    std::fs::write(path, content)?;
-    Ok(())
-}
-
-// Load per-folder settings from disk
-fn load_settings(notes_folder: &str) -> Settings {
-    let path = get_settings_path(notes_folder);
-
-    if path.exists() {
-        std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| serde_json::from_str(&content).ok())
-            .unwrap_or_default()
-    } else {
-        Settings::default()
-    }
-}
-
-// Save per-folder settings to disk
-fn save_settings(notes_folder: &str, settings: &Settings) -> Result<()> {
-    let path = get_settings_path(notes_folder);
-    let content = serde_json::to_string_pretty(settings)?;
     std::fs::write(path, content)?;
     Ok(())
 }
@@ -829,8 +804,8 @@ fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState
         .map_err(|e| format!("Notes folder is not writable: {}", e))?;
     let _ = std::fs::remove_file(&write_test_path);
 
-    // Load per-folder settings (starts fresh with defaults if none exist)
-    let settings = load_settings(&normalized_path);
+    // Load global + folder settings (folder part starts with defaults if none exist)
+    let settings = storage::load(&state.app_data_dir, Some(&normalized_path));
 
     // Update app config
     {
@@ -1501,7 +1476,7 @@ async fn rename_folder(
             }
         }
         // Save settings
-        let _ = save_settings(&folder, &settings);
+        let _ = storage::save(&state.app_data_dir, Some(&folder), &settings);
     }
 
     // Update cache
@@ -1599,7 +1574,7 @@ async fn move_note(
                 }
             }
         }
-        let _ = save_settings(&folder, &settings);
+        let _ = storage::save(&state.app_data_dir, Some(&folder), &settings);
     }
 
     // Update cache
@@ -1704,7 +1679,7 @@ async fn move_folder(
                 }
             }
         }
-        let _ = save_settings(&folder, &settings);
+        let _ = storage::save(&state.app_data_dir, Some(&folder), &settings);
     }
 
     // Update cache
@@ -1751,10 +1726,12 @@ fn update_settings(
     new_settings: Settings,
     state: State<AppState>,
 ) -> Result<(), String> {
-    let folder = {
-        let app_config = state.app_config.read().expect("app_config read lock");
-        app_config.notes_folder.clone().ok_or("Notes folder not set")?
-    };
+    let folder = state
+        .app_config
+        .read()
+        .expect("app_config read lock")
+        .notes_folder
+        .clone();
 
     {
         let mut settings = state.settings.write().expect("settings write lock");
@@ -1762,7 +1739,7 @@ fn update_settings(
     }
 
     let settings = state.settings.read().expect("settings read lock");
-    save_settings(&folder, &settings).map_err(|e| e.to_string())?;
+    storage::save(&state.app_data_dir, folder.as_deref(), &settings).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -1790,7 +1767,7 @@ fn update_git_enabled(
     }
 
     let settings = state.settings.read().expect("settings read lock");
-    save_settings(&folder, &settings).map_err(|e| e.to_string())?;
+    storage::save(&state.app_data_dir, Some(&folder), &settings).map_err(|e| e.to_string())?;
 
     Ok(())
 }
@@ -3747,12 +3724,9 @@ pub fn run() {
                 }
             }
 
-            // Load per-folder settings if notes folder is set
-            let settings = if let Some(ref folder) = app_config.notes_folder {
-                load_settings(folder)
-            } else {
-                Settings::default()
-            };
+            // Load global settings, merged with the folder settings if a notes folder is set
+            let app_data_dir = app.path().app_data_dir()?;
+            let settings = storage::load(&app_data_dir, app_config.notes_folder.as_deref());
 
             // Initialize search index if notes folder is set
             let ignored_dirs = get_effective_ignored_dirs(&settings);
@@ -3771,6 +3745,7 @@ pub fn run() {
             let state = AppState {
                 app_config: RwLock::new(app_config),
                 settings: RwLock::new(settings),
+                app_data_dir,
                 notes_cache: RwLock::new(HashMap::new()),
                 file_watcher: Mutex::new(None),
                 search_index: Mutex::new(search_index),
