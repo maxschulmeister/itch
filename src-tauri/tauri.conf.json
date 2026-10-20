@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Scratch",
+  "productName": "Scratch Fork",
   "version": "1.0.0",
-  "identifier": "com.scratch.app",
+  "identifier": "com.max.scratch-fork",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
