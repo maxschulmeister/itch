@@ -18,7 +18,7 @@ export function FolderPicker() {
 
       if (selected && typeof selected === "string") {
         await setNotesFolder(selected);
-        // Reload theme/font settings from the new folder's .scratch/settings.json
+        // Reload settings, because the folder-specific part changed
         await reloadSettings();
       }
     } catch (err) {

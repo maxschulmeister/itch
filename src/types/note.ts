@@ -43,7 +43,7 @@ export type ThemeColorKey =
 // Partial map of color overrides (hex strings)
 export type CustomColors = Partial<Record<ThemeColorKey, string>>;
 
-// Per-folder settings (stored in .scratch/settings.json)
+// App settings: app-wide fields plus the fields of the open notes folder (stored in the app data directory)
 export interface Settings {
   theme: ThemeSettings;
   editorFont?: EditorFontSettings;
