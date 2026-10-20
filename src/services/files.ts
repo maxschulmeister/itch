@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { open } from "@tauri-apps/plugin-dialog";
 
 export interface FileContent {
   path: string;
@@ -20,6 +21,22 @@ export async function saveFileDirect(
 
 export async function openFilePreview(path: string): Promise<void> {
   return invoke("open_file_preview", { path });
+}
+
+// Ask for a markdown file and open it in its own window
+export async function openFileWithDialog(): Promise<void> {
+  const selected = await open({
+    multiple: false,
+    title: "Open File",
+    filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+  });
+  if (typeof selected === "string") {
+    await openFilePreview(selected);
+  }
+}
+
+export async function getRecentFiles(): Promise<string[]> {
+  return invoke("get_recent_files");
 }
 
 export interface ImportedNote {
