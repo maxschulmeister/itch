@@ -22,6 +22,7 @@ import {
   TableIcon,
   BracketsIcon,
   WorkflowIcon,
+  SparklesIcon,
 } from "../icons";
 import { SlashCommandList, type SlashCommandListRef } from "./SlashCommandList";
 
@@ -182,6 +183,16 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
     aliases: ["link", "note", "wikilink", "[["],
     command: (editor) => {
       editor.chain().focus().insertContent("[[").run();
+    },
+  },
+  {
+    title: "Ask AI",
+    description: "Write with pi at the cursor",
+    icon: <SparklesIcon />,
+    aliases: ["ai", "pi", "write", "continue", "draft"],
+    command: (editor) => {
+      editor.chain().focus().run();
+      window.dispatchEvent(new CustomEvent("slash-command-ai"));
     },
   },
 ];

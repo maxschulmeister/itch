@@ -17,6 +17,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 mod git;
+mod pi;
 mod storage;
 
 // Note metadata for list display
@@ -138,6 +139,12 @@ pub struct Settings {
     pub sidebar_width_px: Option<u32>,
     #[serde(rename = "ollamaModel")]
     pub ollama_model: Option<String>,
+    /// Model for the inline AI popover (`pi --model`); `None` uses pi's default.
+    #[serde(rename = "piModel")]
+    pub pi_model: Option<String>,
+    /// Path to the pi executable; `None` searches the PATH.
+    #[serde(rename = "piPath")]
+    pub pi_path: Option<String>,
     #[serde(rename = "foldersEnabled")]
     pub folders_enabled: Option<bool>,
     #[serde(rename = "ignoredPatterns")]
@@ -3819,6 +3826,7 @@ pub fn run() {
                 debounce_map: Arc::new(Mutex::new(HashMap::new())),
             };
             app.manage(state);
+            app.manage(pi::PiSessions::default());
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
@@ -3852,6 +3860,9 @@ pub fn run() {
             Ok(())
         })
         .on_window_event(|window, event| {
+            if let tauri::WindowEvent::Destroyed = event {
+                pi::close_window_sessions(window.app_handle(), window.label());
+            }
             // Handle drag-and-drop of .md files onto any window
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle();
@@ -3925,6 +3936,9 @@ pub fn run() {
             ai_execute_codex,
             ai_execute_opencode,
             ai_execute_ollama,
+            pi::pi_prompt,
+            pi::pi_abort,
+            pi::pi_close,
             read_file_direct,
             save_file_direct,
             import_file_to_folder,
@@ -3942,6 +3956,9 @@ pub fn run() {
     // Use .run() callback to handle macOS "Open With" file events and dock clicks.
     // RunEvent::Opened and RunEvent::Reopen are macOS-only in Tauri v2.
     app.run(|_app_handle, _event| {
+        if let tauri::RunEvent::Exit = _event {
+            pi::close_all(_app_handle);
+        }
         #[cfg(target_os = "macos")]
         match _event {
             tauri::RunEvent::Opened { urls } => {
