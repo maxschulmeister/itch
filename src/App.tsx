@@ -10,7 +10,7 @@ import { SidebarResizeHandle } from "./components/layout/SidebarResizeHandle";
 import { SIDEBAR_DEFAULT_PX } from "./lib/sidebar";
 import { Editor } from "./components/editor/Editor";
 import type { Editor as TiptapEditor } from "@tiptap/react";
-import { FolderPicker } from "./components/layout/FolderPicker";
+import { StartScreen } from "./components/layout/StartScreen";
 import { CommandPalette } from "./components/command-palette/CommandPalette";
 import { SettingsPage } from "./components/settings";
 import {
@@ -30,6 +30,7 @@ import {
 } from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
+import * as filesService from "./services/files";
 import type { AiProvider } from "./services/ai";
 import { isMac, isWindows } from "./lib/platform";
 
@@ -96,6 +97,11 @@ function AppContent() {
       unlisten?.();
     };
   }, [syncNotesFolder, reloadSettings]);
+
+  // Leave settings when the library closes, so that the start screen shows
+  useEffect(() => {
+    if (!notesFolder) setView("notes");
+  }, [notesFolder]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarVisible((prev) => !prev);
@@ -463,7 +469,11 @@ function AppContent() {
   }
 
   if (!notesFolder) {
-    return <FolderPicker />;
+    return view === "settings" ? (
+      <SettingsPage onBack={closeSettings} />
+    ) : (
+      <StartScreen onOpenSettings={toggleSettings} />
+    );
   }
 
   return (
@@ -638,12 +648,19 @@ function UpdateToast({
 function App() {
   const { isPreview, previewFile } = useMemo(getWindowMode, []);
 
-  // Cmd/Ctrl+W — close window (works in both preview and folder mode)
+  // Cmd/Ctrl+W — close window, Cmd/Ctrl+O — open file (both preview and folder mode)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if ((e.metaKey || e.ctrlKey) && e.key === "w") {
         e.preventDefault();
         getCurrentWindow().close().catch(console.error);
+      }
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "o") {
+        e.preventDefault();
+        filesService.openFileWithDialog().catch((err) => {
+          console.error("Failed to open file:", err);
+          toast.error("Failed to open file");
+        });
       }
     };
     window.addEventListener("keydown", handleKeyDown);

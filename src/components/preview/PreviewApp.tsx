@@ -4,6 +4,7 @@ import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { Editor, type PreviewModeData } from "../editor/Editor";
 import * as filesService from "../../services/files";
+import { getNotesFolder } from "../../services/notes";
 
 interface PreviewAppProps {
   filePath: string;
@@ -154,6 +155,19 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [focusMode, reload]);
 
+  // "Save to folder" needs a library; check again on focus, because it can change
+  const [hasLibrary, setHasLibrary] = useState(false);
+  useEffect(() => {
+    const checkLibrary = () => {
+      getNotesFolder()
+        .then((folder) => setHasLibrary(folder !== null))
+        .catch((error) => console.error("Failed to get notes folder:", error));
+    };
+    checkLibrary();
+    window.addEventListener("focus", checkLibrary);
+    return () => window.removeEventListener("focus", checkLibrary);
+  }, []);
+
   const [isSaving, setIsSaving] = useState(false);
   const savingRef = useRef(false);
 
@@ -190,7 +204,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
       <Editor
         focusMode={focusMode}
         previewMode={previewData}
-        onSaveToFolder={handleSaveToFolder}
+        onSaveToFolder={hasLibrary ? handleSaveToFolder : undefined}
         saveToFolderDisabled={isSaving}
       />
     </div>

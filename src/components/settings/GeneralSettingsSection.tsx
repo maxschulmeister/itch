@@ -45,7 +45,7 @@ function getRemoteWebUrl(url: string | null): string | null {
 }
 
 export function GeneralSettingsSection() {
-  const { notesFolder, setNotesFolder } = useNotes();
+  const { notesFolder, setNotesFolder, closeNotesFolder } = useNotes();
   const { reloadSettings } = useTheme();
   const {
     status,
@@ -129,7 +129,7 @@ export function GeneralSettingsSection() {
 
       if (selected) {
         await setNotesFolder(selected);
-        // Reload theme/font settings from the new folder's .scratch/settings.json
+        // Reload settings, because the folder-specific part changed
         await reloadSettings();
       }
     } catch (err) {
@@ -242,36 +242,36 @@ export function GeneralSettingsSection() {
     }
   };
 
-  return (
-    <div className="space-y-8 py-8">
-      {/* Folder Location */}
-      <section className="pb-2">
-        <h2 className="text-xl font-medium mb-0.5">Folder Location</h2>
-        <p className="text-sm text-text-muted mb-4">
-          Your notes are stored as markdown files in this folder
-        </p>
-        <div className="flex items-center gap-2.5 p-2.5 rounded-[10px] border border-border mb-2.5">
-          <div className="p-2 rounded-md bg-bg-muted">
-            <FolderIcon className="w-4.5 h-4.5 stroke-[1.5] text-text-muted" />
-          </div>
-          <p
-            className="text-sm text-text-muted truncate"
-            title={notesFolder || undefined}
-          >
-            {formatPath(notesFolder)}
-          </p>
+  // Folder Location
+  const folderLocation = (
+    <section className="pb-2">
+      <h2 className="text-xl font-medium mb-0.5">Folder Location</h2>
+      <p className="text-sm text-text-muted mb-4">
+        Your notes are stored as markdown files in this folder
+      </p>
+      <div className="flex items-center gap-2.5 p-2.5 rounded-[10px] border border-border mb-2.5">
+        <div className="p-2 rounded-md bg-bg-muted">
+          <FolderIcon className="w-4.5 h-4.5 stroke-[1.5] text-text-muted" />
         </div>
-        <div className="flex items-center gap-1">
-          <Button
-            onClick={handleChangeFolder}
-            variant="outline"
-            size="md"
-            className="gap-1.25"
-          >
-            <FoldersIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            Change Folder
-          </Button>
-          {notesFolder && (
+        <p
+          className="text-sm text-text-muted truncate"
+          title={notesFolder || undefined}
+        >
+          {formatPath(notesFolder)}
+        </p>
+      </div>
+      <div className="flex items-center gap-1">
+        <Button
+          onClick={handleChangeFolder}
+          variant="outline"
+          size="md"
+          className="gap-1.25"
+        >
+          <FoldersIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+          {notesFolder ? "Change Folder" : "Choose Folder"}
+        </Button>
+        {notesFolder && (
+          <>
             <Button
               onClick={handleOpenFolder}
               variant="ghost"
@@ -280,9 +280,28 @@ export function GeneralSettingsSection() {
             >
               Open Folder
             </Button>
-          )}
-        </div>
-      </section>
+            <Button
+              onClick={closeNotesFolder}
+              variant="ghost"
+              size="md"
+              className="gap-1.25 text-text"
+            >
+              Close Folder
+            </Button>
+          </>
+        )}
+      </div>
+    </section>
+  );
+
+  // Without a library, only the folder location applies
+  if (!notesFolder) {
+    return <div className="space-y-8 py-8">{folderLocation}</div>;
+  }
+
+  return (
+    <div className="space-y-8 py-8">
+      {folderLocation}
 
       {/* Divider */}
       <div className="border-t border-border border-dashed" />

@@ -19,6 +19,7 @@ export const shortcutCategories: ShortcutCategory[] = [
       { keys: [mod, "\\"], description: "Toggle sidebar" },
       { keys: [mod, ","], description: "Settings" },
       { keys: [mod, "/"], description: "Keyboard shortcuts" },
+      { keys: [mod, "O"], description: "Open file" },
       { keys: [mod, "W"], description: "Close window" },
       { keys: [mod, "="], description: "Zoom in" },
       { keys: [mod, "-"], description: "Zoom out" },

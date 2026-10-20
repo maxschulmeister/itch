@@ -9,6 +9,10 @@ export async function setNotesFolder(path: string): Promise<void> {
   return invoke("set_notes_folder", { path });
 }
 
+export async function closeNotesFolder(): Promise<void> {
+  return invoke("close_notes_folder");
+}
+
 export async function listNotes(): Promise<NoteMetadata[]> {
   return invoke("list_notes");
 }

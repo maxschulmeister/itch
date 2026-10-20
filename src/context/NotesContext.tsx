@@ -41,6 +41,7 @@ interface NotesActionsContextValue {
   reloadCurrentNote: () => Promise<void>;
   setNotesFolder: (path: string) => Promise<void>;
   syncNotesFolder: (path: string) => Promise<void>;
+  closeNotesFolder: () => Promise<void>;
   search: (query: string) => Promise<void>;
   clearSearch: () => void;
   pinNote: (id: string) => Promise<void>;
@@ -516,6 +517,20 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const closeNotesFolder = useCallback(async () => {
+    try {
+      await notesService.closeNotesFolder();
+      setNotesFolderState(null);
+      setNotes([]);
+      setSelectedNoteId(null);
+      setCurrentNote(null);
+    } catch (err) {
+      setError(
+        err instanceof Error ? err.message : "Failed to close notes folder"
+      );
+    }
+  }, []);
+
   // Update local state only (backend already initialized the folder).
   // Used when the CLI sets the notes folder and emits an event.
   const syncNotesFolder = useCallback(async (path: string) => {
@@ -723,6 +738,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
+      closeNotesFolder,
       search,
       clearSearch,
       pinNote,
@@ -745,6 +761,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       reloadCurrentNote,
       setNotesFolder,
       syncNotesFolder,
+      closeNotesFolder,
       search,
       clearSearch,
       pinNote,

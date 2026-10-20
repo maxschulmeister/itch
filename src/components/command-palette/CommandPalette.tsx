@@ -14,6 +14,7 @@ import { useTheme } from "../../context/ThemeContext";
 import { useGit } from "../../context/GitContext";
 import * as notesService from "../../services/notes";
 import * as aiService from "../../services/ai";
+import * as filesService from "../../services/files";
 import { downloadPdf, downloadMarkdown } from "../../services/pdf";
 import type { Settings } from "../../types/note";
 import type { Editor } from "@tiptap/react";
@@ -50,6 +51,7 @@ import {
   FolderIcon,
   FolderPlusIcon,
   KeyboardIcon,
+  NoteIcon,
 } from "../icons";
 import { mod, shift } from "../../lib/platform";
 import type { AiProvider } from "../../services/ai";
@@ -93,6 +95,7 @@ export function CommandPalette({
     pinNote,
     unpinNote,
     notesFolder,
+    closeNotesFolder,
   } = useNotes();
   const { setTheme } = useTheme();
   const { status, gitAvailable, gitEnabled, commit, sync, isSyncing } = useGit();
@@ -164,6 +167,21 @@ export function CommandPalette({
         action: () => {
           onClose();
           window.dispatchEvent(new CustomEvent("create-new-folder"));
+        },
+      },
+      {
+        id: "open-file",
+        label: "Open File…",
+        shortcut: `${mod} O`,
+        icon: <NoteIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: async () => {
+          onClose();
+          try {
+            await filesService.openFileWithDialog();
+          } catch (error) {
+            console.error("Failed to open file:", error);
+            toast.error("Failed to open file");
+          }
         },
       },
     ];
@@ -448,6 +466,15 @@ export function CommandPalette({
           }
         },
       });
+      baseCommands.push({
+        id: "close-folder",
+        label: "Close Notes Folder",
+        icon: <FolderIcon className="w-4.5 h-4.5 stroke-[1.5]" />,
+        action: () => {
+          onClose();
+          closeNotesFolder();
+        },
+      });
     }
 
     // Keyboard shortcuts, settings, and theme commands at the bottom
@@ -525,6 +552,7 @@ export function CommandPalette({
     focusMode,
     onToggleFocusMode,
     notesFolder,
+    closeNotesFolder,
     onOpenShortcuts,
   ]);
 
