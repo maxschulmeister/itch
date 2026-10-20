@@ -44,6 +44,7 @@ export const shortcutCategories: ShortcutCategory[] = [
       { keys: [mod, "B"], description: "Bold" },
       { keys: [mod, "I"], description: "Italic" },
       { keys: [mod, "K"], description: "Add / edit link" },
+      { keys: [mod, "J"], description: "Ask AI" },
       { keys: [mod, "F"], description: "Find in note" },
       { keys: [mod, shift, "C"], description: "Copy & Export" },
       { keys: [mod, shift, "P"], description: "Print / Export as PDF" },
