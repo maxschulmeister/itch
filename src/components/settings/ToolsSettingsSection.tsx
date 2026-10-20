@@ -1,7 +1,7 @@
-import { useState, useEffect, useReducer } from "react";
+import { useState, useEffect, useReducer, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { Button } from "../ui";
+import { Button, Input } from "../ui";
 import {
   SpinnerIcon,
   CheckIcon,
@@ -15,6 +15,7 @@ import * as aiService from "../../services/ai";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
+import type { Settings } from "../../types/note";
 
 type CliState = {
   status: CliStatus | null;
@@ -93,6 +94,89 @@ const AI_PROVIDER_INFO: Record<
     installUrl: "https://ollama.com",
   },
 };
+
+type PiSettingKey = "piModel" | "piPath";
+
+function PiSettings() {
+  const [values, setValues] = useState<Record<PiSettingKey, string>>({
+    piModel: "",
+    piPath: "",
+  });
+  const [saved, setSaved] = useState(values);
+
+  useEffect(() => {
+    invoke<Settings>("get_settings")
+      .then((settings) => {
+        const loaded = {
+          piModel: settings.piModel ?? "",
+          piPath: settings.piPath ?? "",
+        };
+        setValues(loaded);
+        setSaved(loaded);
+      })
+      .catch((error) => console.error("Failed to load pi settings:", error));
+  }, []);
+
+  const save = useCallback(
+    async (key: PiSettingKey) => {
+      const value = values[key].trim();
+      if (value === saved[key]) return;
+      try {
+        const settings = await invoke<Settings>("get_settings");
+        await invoke("update_settings", {
+          newSettings: { ...settings, [key]: value || undefined },
+        });
+        setSaved((prev) => ({ ...prev, [key]: value }));
+        toast.success("pi settings saved");
+      } catch (error) {
+        console.error("Failed to save pi settings:", error);
+        toast.error("Unable to save pi settings");
+      }
+    },
+    [values, saved],
+  );
+
+  return (
+    <div className="rounded-[10px] border border-border pl-4 py-3 pr-3 space-y-3">
+      <div className="flex items-center justify-between gap-4">
+        <label htmlFor="pi-model" className="text-sm text-text font-medium">
+          Model
+        </label>
+        <Input
+          id="pi-model"
+          value={values.piModel}
+          onChange={(e) => setValues((v) => ({ ...v, piModel: e.target.value }))}
+          onBlur={() => save("piModel")}
+          placeholder="anthropic/claude-sonnet-4-5"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="w-64 h-9 font-mono text-xs"
+        />
+      </div>
+      <div className="flex items-center justify-between gap-4">
+        <label htmlFor="pi-path" className="text-sm text-text font-medium">
+          pi path
+        </label>
+        <Input
+          id="pi-path"
+          value={values.piPath}
+          onChange={(e) => setValues((v) => ({ ...v, piPath: e.target.value }))}
+          onBlur={() => save("piPath")}
+          placeholder="/usr/local/bin/pi"
+          spellCheck={false}
+          autoCapitalize="off"
+          autoCorrect="off"
+          className="w-64 h-9 font-mono text-xs"
+        />
+      </div>
+      <p className="text-xs text-text-muted">
+        Leave the model empty to use the default model of pi. Leave the path
+        empty to find pi on your PATH.
+      </p>
+    </div>
+  );
+}
 
 export function ToolsSettingsSection() {
   const [cli, dispatchCli] = useReducer(cliReducer, cliInitialState);
@@ -202,6 +286,18 @@ export function ToolsSettingsSection() {
             })}
           </div>
         )}
+      </section>
+
+      <div className="border-t border-border border-dashed" />
+
+      {/* Inline AI (pi) */}
+      <section className="pb-2">
+        <h2 className="text-xl font-medium mb-0.5">Ask AI</h2>
+        <p className="text-sm text-text-muted mb-4">
+          Write and edit text with pi in the editor ({mod}J or the Ask AI
+          button on a selection)
+        </p>
+        <PiSettings />
       </section>
 
       {/* CLI Tool (macOS only) */}

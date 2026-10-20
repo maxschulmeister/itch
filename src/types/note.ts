@@ -57,6 +57,8 @@ export interface Settings {
   defaultNoteName?: string;
   interfaceZoom?: number;
   ollamaModel?: string;
+  piModel?: string;
+  piPath?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;
   customColorsDark?: CustomColors;
