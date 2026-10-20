@@ -65,6 +65,7 @@ import { BlockMathEditor } from "./BlockMathEditor";
 import { LinkEditor } from "./LinkEditor";
 import { SearchToolbar } from "./SearchToolbar";
 import { SlashCommand } from "./SlashCommand";
+import { AiHighlight, useAiAssist } from "./AiAssist";
 import { Wikilink, type WikilinkStorage } from "./Wikilink";
 import { WikilinkSuggestion } from "./WikilinkSuggestion";
 import { EditorWidthHandles } from "./EditorWidthHandle";
@@ -1117,6 +1118,7 @@ export function Editor({
         currentIndex: 0,
       }),
       SlashCommand,
+      AiHighlight,
       Wikilink,
       WikilinkSuggestion,
       ScratchBlockMath.configure({
@@ -1273,6 +1275,8 @@ export function Editor({
   const lastSaveRef = useRef<{ noteId: string; content: string } | null>(null);
   // Track reloadVersion to detect manual refreshes
   const lastReloadVersionRef = useRef(0);
+
+  useAiAssist(editor);
 
   // Notify parent component when editor is ready
   useEffect(() => {

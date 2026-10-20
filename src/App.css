@@ -652,6 +652,11 @@ html.dark {
   border-inline-start-color: var(--color-border);
 }
 
+/* Text that the Ask AI popover will edit */
+.ai-target {
+  background-color: var(--color-selection);
+}
+
 /* Search match highlighting - uses the selection color */
 .search-match {
   background-color: color-mix(in srgb, var(--color-selection), transparent 50%);
