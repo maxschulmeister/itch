@@ -97,11 +97,20 @@ pub enum TextDirection {
     Rtl,
 }
 
-// App config (stored in app data directory - just the notes folder path)
+// App config (stored in app data directory: notes folder path and recent files)
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct AppConfig {
     pub notes_folder: Option<String>,
+    /// Canonical paths of files opened in file windows, most recent first.
+    #[serde(default)]
+    pub recent_files: Vec<String>,
 }
+
+/// Files that macOS delivers through `RunEvent::Opened` before `setup` runs.
+/// AppKit calls `application:openURLs:` before `applicationDidFinishLaunching:` on a cold
+/// start, and tao/tauri run `setup` on the latter. `setup` takes the queue (leaving `None`),
+/// so later `Opened` events open their files directly.
+struct PendingOpenedFiles(Mutex<Option<Vec<PathBuf>>>);
 
 // App settings. Persisted by the `storage` module: app-wide fields in the app data
 // directory, folder-specific fields in a per-folder file (also in the app data directory).
@@ -3567,59 +3576,130 @@ fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String>
         .title_bar_style(tauri::TitleBarStyle::Overlay)
         .hidden_title(true);
 
-    let window = builder
+    builder
         .build()
         .map_err(|e| format!("Failed to create preview window: {}", e))?;
 
-    // Focus the preview window so it appears on top of the main window.
-    // Use a short delay because during cold start the main window may steal
-    // focus after its WebView finishes loading.
-    let win = window.clone();
-    std::thread::spawn(move || {
-        std::thread::sleep(std::time::Duration::from_millis(500));
-        let _ = win.set_focus();
-    });
-
     Ok(())
 }
 
-#[tauri::command]
-fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
-    let file_path = PathBuf::from(&path);
-    if !file_path.exists() {
-        return Err(format!("File not found: {}", path));
+fn show_main_window(app: &AppHandle) {
+    if let Some(main_window) = app.get_webview_window("main") {
+        let _ = main_window.show();
+        let _ = main_window.set_focus();
     }
-
-    if !try_select_in_notes_folder(&app, &file_path) {
-        create_preview_window(&app, &path)?;
-    }
-    Ok(())
 }
 
-// Handle CLI arguments: open .md files in preview mode.
-// Returns true if a standalone preview window was created (file outside notes folder).
-fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
-    let mut opened_file = false;
-    let mut opened_preview = false;
+/// Add a file to the recent files list and save the app config.
+fn remember_recent_file(app: &AppHandle, canonical_path: &Path) {
+    let state = app.state::<AppState>();
+    let mut app_config = state.app_config.write().expect("app_config write lock");
+    storage::push_recent_file(
+        &mut app_config.recent_files,
+        canonical_path.to_string_lossy().into_owned(),
+    );
+    if let Err(e) = save_app_config(app, &app_config) {
+        eprintln!("Failed to save recent files: {}", e);
+    }
+}
 
-    for arg in args.iter().skip(1) {
-        // Skip flags
-        if arg.starts_with('-') {
-            continue;
+/// Open a markdown file: select it when it is a note in the library, else open it in a
+/// file window. Returns true when a file window was opened.
+/// Without a library, the main window only shows the start screen, so it is hidden.
+fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
+    if try_select_in_notes_folder(app, path) {
+        return Ok(false);
+    }
+
+    let canonical = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    create_preview_window(app, &canonical.to_string_lossy())?;
+    remember_recent_file(app, &canonical);
+
+    let has_library = app
+        .state::<AppState>()
+        .app_config
+        .read()
+        .expect("app_config read lock")
+        .notes_folder
+        .is_some();
+    if !has_library {
+        if let Some(main_window) = app.get_webview_window("main") {
+            let _ = main_window.hide();
         }
+    }
+    Ok(true)
+}
 
-        let path = if PathBuf::from(arg).is_absolute() {
-            PathBuf::from(arg)
-        } else {
-            PathBuf::from(cwd).join(arg)
-        };
+// Async: creating a window in a sync command can deadlock on Windows.
+#[tauri::command]
+async fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
+    let file_path = PathBuf::from(&path);
+    if !is_markdown_extension(&file_path) || !file_path.is_file() {
+        return Err(format!("Not a markdown file: {}", path));
+    }
 
-        if is_markdown_extension(&path) && path.is_file() {
-            opened_file = true;
-            if !try_select_in_notes_folder(app, &path)
-                && create_preview_window(app, &path.to_string_lossy()).is_ok()
-            {
-                opened_preview = true;
+    open_markdown_file(&app, &file_path)?;
+    Ok(())
+}
+
+/// Recently opened files that still exist, most recent first.
+#[tauri::command]
+fn get_recent_files(state: State<AppState>) -> Vec<String> {
+    let app_config = state.app_config.read().expect("app_config read lock");
+    app_config
+        .recent_files
+        .iter()
+        .filter(|path| Path::new(path).is_file())
+        .cloned()
+        .collect()
+}
+
+/// Close the library: forget the notes folder and go back to the start screen.
+#[tauri::command]
+fn close_notes_folder(app: AppHandle, state: State<AppState>) -> Result<(), String> {
+    {
+        let mut app_config = state.app_config.write().expect("app_config write lock");
+        app_config.notes_folder = None;
+        save_app_config(&app, &app_config).map_err(|e| e.to_string())?;
+    }
+
+    *state.settings.write().expect("settings write lock") = storage::load(&state.app_data_dir, None);
+    *state.file_watcher.lock().expect("file watcher mutex") = None;
+    *state.search_index.lock().expect("search index mutex") = None;
+    state.notes_cache.write().expect("cache write lock").clear();
+    Ok(())
+}
+
+// Resolve CLI arguments (skipping the program name and flags) to absolute paths.
+fn cli_paths(args: &[String], cwd: &str) -> Vec<PathBuf> {
+    args.iter()
+        .skip(1)
+        .filter(|arg| !arg.starts_with('-'))
+        .map(|arg| {
+            if PathBuf::from(arg).is_absolute() {
+                PathBuf::from(arg)
+            } else {
+                PathBuf::from(cwd).join(arg)
+            }
+        })
+        .collect()
+}
+
+/// Open launch paths: markdown files open in file windows (or in the library), and a
+/// directory becomes the notes folder. Returns true when the main window must be shown:
+/// when no file window opened, or when the library was used.
+fn open_paths(app: &AppHandle, paths: &[PathBuf]) -> bool {
+    let mut opened_file_window = false;
+    let mut used_library = false;
+
+    for path in paths {
+        if is_markdown_extension(path) && path.is_file() {
+            match open_markdown_file(app, path) {
+                Ok(true) => opened_file_window = true,
+                Ok(false) => used_library = true,
+                Err(e) => eprintln!("Failed to open {:?}: {}", path, e),
             }
         } else if path.is_dir() {
             let canonical = path.canonicalize().unwrap_or(path.clone());
@@ -3630,28 +3710,16 @@ fn handle_cli_args(app: &AppHandle, args: &[String], cwd: &str) -> bool {
                 Ok(normalized_path) => {
                     // Emit event for when app is already running (single-instance)
                     let _ = app.emit("set-notes-folder", normalized_path);
-                    opened_file = true;
+                    used_library = true;
                 }
                 Err(e) => {
                     eprintln!("Failed to initialize notes folder {:?}: {}", canonical, e);
                 }
             }
-            if let Some(main_window) = app.get_webview_window("main") {
-                let _ = main_window.show();
-                let _ = main_window.set_focus();
-            }
         }
     }
 
-    // If no files were opened, show and focus the main window
-    if !opened_file {
-        if let Some(main_window) = app.get_webview_window("main") {
-            let _ = main_window.show();
-            let _ = main_window.set_focus();
-        }
-    }
-
-    opened_preview
+    used_library || !opened_file_window
 }
 
 // On macOS, WKWebView reads per-app preferences from NSUserDefaults to decide
@@ -3685,9 +3753,12 @@ pub fn run() {
     enable_webview_spellcheck_defaults();
 
     let app = tauri::Builder::default()
+        .manage(PendingOpenedFiles(Mutex::new(Some(Vec::new()))))
         // Single-instance: forward CLI args from subsequent launches to the running instance
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
-            handle_cli_args(app, &args, &cwd);
+            if open_paths(app, &cli_paths(&args, &cwd)) {
+                show_main_window(app);
+            }
         }))
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_fs::init())
@@ -3754,42 +3825,28 @@ pub fn run() {
                 let _ = app.asset_protocol_scope().allow_directory(folder, true);
             }
 
-            // Handle CLI args on first launch; determine whether to show the main window.
-            // When a standalone preview is opened (file outside the notes folder) and the
-            // notes folder is already configured, the main window is closed so users only
-            // see the preview. When no notes folder is configured yet, the main window is
-            // always shown so new users can complete onboarding via the FolderPicker.
-            let args: Vec<String> = std::env::args().collect();
-            let opened_preview = if args.len() > 1 {
-                let cwd = std::env::current_dir()
-                    .unwrap_or_default()
-                    .to_string_lossy()
-                    .into_owned();
-                handle_cli_args(app.handle(), &args, &cwd)
-            } else {
-                false
-            };
+            // Open launch files (CLI args, and on macOS the files of "Open With").
+            // The main window starts hidden; show it only when no file window opened or
+            // the library was used, so that opening a file shows only that file's window.
+            let cwd = std::env::current_dir()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned();
+            let mut launch_paths = cli_paths(&std::env::args().collect::<Vec<_>>(), &cwd);
+            launch_paths.extend(
+                app.state::<PendingOpenedFiles>()
+                    .0
+                    .lock()
+                    .expect("pending opened files mutex")
+                    .take()
+                    .unwrap_or_default(),
+            );
 
-            if let Some(main_window) = app.get_webview_window("main") {
-                let has_notes_folder = app
-                    .state::<AppState>()
-                    .app_config
-                    .read()
-                    .expect("app_config read lock")
-                    .notes_folder
-                    .is_some();
-
-                if opened_preview && has_notes_folder {
-                    // Existing user: notes folder is configured and a standalone preview
-                    // was opened. Close the hidden main window so only the preview is visible.
-                    let _ = main_window.hide();
-                } else {
-                    // Show the main window when:
-                    // - No standalone preview was opened (normal launch), OR
-                    // - No notes folder is configured yet (new user needs FolderPicker
-                    //   for onboarding, even if a preview is also showing).
-                    let _ = main_window.show();
-                }
+            if open_paths(app.handle(), &launch_paths) {
+                show_main_window(app.handle());
+            } else if let Some(main_window) = app.get_webview_window("main") {
+                // Linux creates the main window visible
+                let _ = main_window.hide();
             }
 
             Ok(())
@@ -3799,12 +3856,24 @@ pub fn run() {
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
                 let app = window.app_handle();
                 for path in paths {
-                    if is_markdown_extension(path)
-                        && path.is_file()
-                        && !try_select_in_notes_folder(app, path)
-                    {
-                        let _ = create_preview_window(app, &path.to_string_lossy());
+                    if is_markdown_extension(path) && path.is_file() {
+                        if let Err(e) = open_markdown_file(app, path) {
+                            eprintln!("Failed to open {:?}: {}", path, e);
+                        }
                     }
+                }
+            }
+
+            // Windows/Linux have no dock to reopen a hidden main window: quit when the
+            // last visible window closes.
+            #[cfg(not(target_os = "macos"))]
+            if let tauri::WindowEvent::Destroyed = event {
+                let app = window.app_handle();
+                let any_visible = app.webview_windows().iter().any(|(label, other)| {
+                    label.as_str() != window.label() && other.is_visible().unwrap_or(false)
+                });
+                if !any_visible {
+                    app.exit(0);
                 }
             }
         })
@@ -3860,6 +3929,8 @@ pub fn run() {
             save_file_direct,
             import_file_to_folder,
             open_file_preview,
+            get_recent_files,
+            close_notes_folder,
             install_cli,
             uninstall_cli,
             get_cli_status,
@@ -3868,21 +3939,33 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
 
-    // Use .run() callback to handle macOS "Open With" file events
-    // RunEvent::Opened is macOS-only in Tauri v2
+    // Use .run() callback to handle macOS "Open With" file events and dock clicks.
+    // RunEvent::Opened and RunEvent::Reopen are macOS-only in Tauri v2.
     app.run(|_app_handle, _event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Opened { urls } = _event {
-            for url in urls {
-                if let Ok(path) = url.to_file_path() {
-                    if is_markdown_extension(&path)
-                        && path.is_file()
-                        && !try_select_in_notes_folder(_app_handle, &path)
-                    {
-                        let _ = create_preview_window(_app_handle, &path.to_string_lossy());
+        match _event {
+            tauri::RunEvent::Opened { urls } => {
+                let paths: Vec<PathBuf> =
+                    urls.iter().filter_map(|url| url.to_file_path().ok()).collect();
+                let pending = _app_handle.state::<PendingOpenedFiles>();
+                let mut pending = pending.0.lock().expect("pending opened files mutex");
+                if let Some(queue) = pending.as_mut() {
+                    // Cold start: setup has not run yet and opens these files.
+                    queue.extend(paths);
+                } else {
+                    drop(pending);
+                    if open_paths(_app_handle, &paths) {
+                        show_main_window(_app_handle);
                     }
                 }
             }
+            // Dock click with no visible window (e.g. the last file window closed while
+            // the main window is hidden): show the start screen or the library.
+            tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } => show_main_window(_app_handle),
+            _ => {}
         }
     });
 }

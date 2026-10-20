@@ -187,6 +187,16 @@ pub fn save(app_data: &Path, folder: Option<&str>, settings: &Settings) -> anyho
     Ok(())
 }
 
+/// Maximum number of entries in the recent files list.
+pub const MAX_RECENT_FILES: usize = 10;
+
+/// Move `path` to the front of the recent files list, without duplicates.
+pub fn push_recent_file(recent: &mut Vec<String>, path: String) {
+    recent.retain(|existing| *existing != path);
+    recent.insert(0, path);
+    recent.truncate(MAX_RECENT_FILES);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -366,6 +376,28 @@ mod tests {
         assert_eq!(other_folder.git_enabled, None);
 
         std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn push_recent_file_puts_newest_first_without_duplicates() {
+        let mut recent = vec!["/a.md".to_string(), "/b.md".to_string()];
+
+        push_recent_file(&mut recent, "/b.md".to_string());
+        assert_eq!(recent, vec!["/b.md", "/a.md"]);
+
+        push_recent_file(&mut recent, "/c.md".to_string());
+        assert_eq!(recent, vec!["/c.md", "/b.md", "/a.md"]);
+    }
+
+    #[test]
+    fn push_recent_file_keeps_at_most_max_entries() {
+        let mut recent: Vec<String> = (0..MAX_RECENT_FILES).map(|i| format!("/{}.md", i)).collect();
+
+        push_recent_file(&mut recent, "/new.md".to_string());
+
+        assert_eq!(recent.len(), MAX_RECENT_FILES);
+        assert_eq!(recent[0], "/new.md");
+        assert!(!recent.contains(&format!("/{}.md", MAX_RECENT_FILES - 1)));
     }
 
     #[test]
