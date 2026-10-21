@@ -17,6 +17,21 @@
   --color-accent: #1c1917;
   --color-selection: rgba(250, 204, 21, 0.4); /* Tailwind yellow-400 */
 
+  /* Floating menus (selection toolbar, dropdowns, AI menu) */
+  --color-bg-elevated: #ffffff;
+  --color-menu-fg: rgba(28, 25, 23, 0.78);
+  --color-menu-hover: rgba(28, 25, 23, 0.09);
+  --shadow-menu:
+    0 16px 48px rgba(17, 24, 39, 0.04), 0 12px 24px rgba(17, 24, 39, 0.04),
+    0 6px 8px rgba(17, 24, 39, 0.02), 0 2px 3px rgba(17, 24, 39, 0.02);
+
+  /* AI: buttons, focus border, the streaming text in the document */
+  --color-ai: #6229ff;
+  --color-ai-hover: #5400e5;
+  --color-ai-text: #5400e5;
+  --color-ai-dot-1: #7a52ff;
+  --color-ai-dot-3: #c3bdff;
+
   /* Editor font settings - simplified (overridden by ThemeContext) */
   --editor-font-family:
     -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue",
@@ -61,6 +76,15 @@
   --color-border: rgba(250, 249, 249, 0.07);
   --color-accent: #fafaf9;
   --color-selection: rgba(253, 224, 71, 0.35); /* Tailwind yellow-300 */
+
+  --color-bg-elevated: rgb(33, 31, 30);
+  --color-menu-fg: rgba(250, 249, 249, 0.64);
+  --color-menu-hover: rgba(250, 249, 249, 0.12);
+  --shadow-menu:
+    0 16px 48px rgba(0, 0, 0, 0.5), 0 12px 24px rgba(0, 0, 0, 0.24),
+    0 6px 8px rgba(0, 0, 0, 0.22), 0 2px 3px rgba(0, 0, 0, 0.12);
+
+  --color-ai-text: #7a52ff;
 
   /* Syntax highlighting colors - Dark (GitHub) */
   --color-syntax-keyword: #ea4a5a;
@@ -111,6 +135,31 @@
 
   /* Accent colors */
   --color-accent: var(--color-accent);
+
+  /* Floating menus */
+  --color-bg-elevated: var(--color-bg-elevated);
+  --color-menu-fg: var(--color-menu-fg);
+  --color-menu-hover: var(--color-menu-hover);
+  --shadow-menu: var(--shadow-menu);
+  --color-ai: var(--color-ai);
+  --color-ai-hover: var(--color-ai-hover);
+
+  --ease-menu: cubic-bezier(0.46, 0.03, 0.52, 0.96);
+  --animate-menu-in: menu-in 100ms ease;
+  --animate-fade-in: fade-in 100ms ease;
+  --animate-toolbar-in: fade-in 250ms cubic-bezier(0.46, 0.03, 0.52, 0.96);
+
+  @keyframes menu-in {
+    from {
+      opacity: 0;
+      transform: scale(0.95) translateY(-8px);
+    }
+  }
+  @keyframes fade-in {
+    from {
+      opacity: 0;
+    }
+  }
 }
 
 /* Base styles */
@@ -652,9 +701,64 @@ html.dark {
   border-inline-start-color: var(--color-border);
 }
 
-/* Text that the Ask AI popover will edit */
+/* Text that the AI menu will edit */
 .ai-target {
   background-color: var(--color-selection);
+}
+
+/* The AI answer streams into the document in place of the target text */
+.ai-replaced {
+  display: none;
+}
+.ProseMirror .ai-insertion,
+.ProseMirror .ai-insertion * {
+  color: var(--color-ai-text);
+}
+div.ai-insertion > :last-child {
+  margin-bottom: 0;
+}
+
+/* "AI is writing" dots */
+.ai-dot {
+  border-radius: 9999px;
+  background-color: var(--color-bg-emphasis);
+  transform: scale(0.8);
+  animation: ai-dot 0.8s ease-in-out infinite;
+}
+.ai-dot:nth-child(1) {
+  --ai-dot-color: var(--color-ai-dot-1);
+  width: 6px;
+  height: 6px;
+}
+.ai-dot:nth-child(2) {
+  --ai-dot-color: var(--color-ai);
+  width: 12px;
+  height: 12px;
+  animation-delay: 0.1s;
+}
+.ai-dot:nth-child(3) {
+  --ai-dot-color: var(--color-ai-dot-3);
+  width: 8px;
+  height: 8px;
+  animation-delay: 0.2s;
+}
+@keyframes ai-dot {
+  40% {
+    background-color: var(--ai-dot-color);
+    transform: scale(1.2);
+  }
+  80%,
+  100% {
+    background-color: var(--color-bg-emphasis);
+    transform: scale(0.8);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .ai-dot {
+    animation: none;
+    background-color: var(--ai-dot-color);
+    transform: none;
+  }
 }
 
 /* Search match highlighting - uses the selection color */

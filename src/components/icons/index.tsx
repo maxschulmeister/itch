@@ -1624,3 +1624,261 @@ export function LanguagesIcon({ className = "w-4.5 h-4.5" }: IconProps) {
     </svg>
   );
 }
+
+export function TypeIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <polyline points="4 7 4 4 20 4 20 7" />
+      <line x1="9" x2="15" y1="20" y2="20" />
+      <line x1="12" x2="12" y1="4" y2="20" />
+    </svg>
+  );
+}
+
+export function MicVocalIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m11 7.601-5.994 8.19a1 1 0 0 0 .1 1.298l.817.818a1 1 0 0 0 1.314.087L15.09 12" />
+      <path d="M16.5 21.174C15.5 20.5 14.372 20 13 20c-2.058 0-3.928 2.356-6 2-2.072-.356-2.775-3.369-1.5-4.5" />
+      <circle cx="16" cy="7" r="5" />
+    </svg>
+  );
+}
+
+export function SpellCheckIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m6 16 6-12 6 12" />
+      <path d="M8 12h8" />
+      <path d="m16 20 2 2 4-4" />
+    </svg>
+  );
+}
+
+export function ArrowDownWideNarrowIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m3 16 4 4 4-4" />
+      <path d="M7 20V4" />
+      <path d="M11 4h10" />
+      <path d="M11 8h7" />
+      <path d="M11 12h4" />
+    </svg>
+  );
+}
+
+export function ArrowUpNarrowWideIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m3 8 4-4 4 4" />
+      <path d="M7 4v16" />
+      <path d="M11 12h4" />
+      <path d="M11 16h7" />
+      <path d="M11 20h10" />
+    </svg>
+  );
+}
+
+export function FeatherIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12.67 19a2 2 0 0 0 1.416-.588l6.154-6.172a6 6 0 0 0-8.49-8.49L5.586 9.914A2 2 0 0 0 5 11.328V18a1 1 0 0 0 1 1z" />
+      <path d="M16 8 2 22" />
+      <path d="M17.5 15H9" />
+    </svg>
+  );
+}
+
+export function SmilePlusIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M22 11v1a10 10 0 1 1-9-10" />
+      <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+      <line x1="9" x2="9.01" y1="9" y2="9" />
+      <line x1="15" x2="15.01" y1="9" y2="9" />
+      <path d="M16 5h6" />
+      <path d="M19 2v6" />
+    </svg>
+  );
+}
+
+export function PenLineIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M12 20h9" />
+      <path d="M16.376 3.622a1 1 0 0 1 3.002 3.002L7.368 18.635a2 2 0 0 1-.855.506l-2.872.838a.5.5 0 0 1-.62-.62l.838-2.872a2 2 0 0 1 .506-.854z" />
+    </svg>
+  );
+}
+
+export function ListCollapseIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m3 10 2.5-2.5L3 5" />
+      <path d="m3 19 2.5-2.5L3 14" />
+      <path d="M10 6h11" />
+      <path d="M10 12h11" />
+      <path d="M10 18h11" />
+    </svg>
+  );
+}
+
+export function WandSparklesIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72" />
+      <path d="m14 7 3 3" />
+      <path d="M5 6v4" />
+      <path d="M19 14v4" />
+      <path d="M10 2v2" />
+      <path d="M7 8H3" />
+      <path d="M21 16h-4" />
+      <path d="M11 3H9" />
+    </svg>
+  );
+}
+
+export function IndentDecreaseIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M21 12H11" />
+      <path d="M21 18H11" />
+      <path d="M21 6H11" />
+      <path d="m7 8-4 4 4 4" />
+    </svg>
+  );
+}
+
+export function IndentIncreaseIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M21 12H11" />
+      <path d="M21 18H11" />
+      <path d="M21 6H11" />
+      <path d="m3 8 4 4-4 4" />
+    </svg>
+  );
+}
+
+export function RotateCcwIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg
+      className={className}
+      fill="none"
+      stroke="currentColor"
+      viewBox="0 0 24 24"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8" />
+      <path d="M3 3v5h5" />
+    </svg>
+  );
+}
+
+/** lucide circle-stop with a filled circle: the stop button of the AI menu. */
+export function CircleStopIcon({ className = "w-4.5 h-4.5" }: IconProps) {
+  return (
+    <svg className={className} viewBox="0 0 24 24" aria-hidden="true">
+      <circle cx="12" cy="12" r="10" fill="currentColor" />
+      <rect x="9" y="9" width="6" height="6" rx="1" fill="var(--color-bg-elevated)" />
+    </svg>
+  );
+}
