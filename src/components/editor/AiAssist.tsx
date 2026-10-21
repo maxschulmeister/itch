@@ -3,45 +3,133 @@ import { Extension, posToDOMRect, type Editor as TiptapEditor } from "@tiptap/co
 import { ReactRenderer } from "@tiptap/react";
 import type { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import { DOMSerializer } from "@tiptap/pm/model";
-import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
+import {
+  Plugin,
+  PluginKey,
+  type EditorState,
+  type Transaction,
+} from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import tippy, { type Instance as TippyInstance } from "tippy.js";
 import {
-  AiPopover,
+  AiMenu,
   type AiApplyAction,
   type AiContext,
-  type AiPopoverProps,
-} from "./AiPopover";
+  type AiMenuProps,
+} from "./AiMenu";
+import { isInMenuLayer } from "./menuParts";
 
 type Range = { from: number; to: number };
 
-const aiHighlightKey = new PluginKey<DecorationSet>("aiHighlight");
+interface AiHighlightState {
+  /** The text that the AI menu edits, or the cursor. */
+  range: Range | null;
+  /** The streaming answer, shown in place of `range`. */
+  preview: HTMLElement | null;
+  /** Changes with each new preview element (the widget key). */
+  version: number;
+}
+
+type AiHighlightMeta = { range: Range | null } | { preview: HTMLElement | null };
+
+const aiHighlightKey = new PluginKey<AiHighlightState>("aiHighlight");
 
 /** Shows `range` as the AI target while the focus is outside the editor. */
 export function setAiHighlight(editor: TiptapEditor, range: Range | null) {
-  editor.view.dispatch(editor.state.tr.setMeta(aiHighlightKey, range));
+  editor.view.dispatch(
+    editor.state.tr.setMeta(aiHighlightKey, { range } satisfies AiHighlightMeta),
+  );
 }
 
-/** Keeps the AI target range visible while focus is in the popover. */
+/** Shows `preview` in place of the AI target (null: the target again). */
+function setAiPreview(editor: TiptapEditor, preview: HTMLElement | null) {
+  editor.view.dispatch(
+    editor.state.tr.setMeta(aiHighlightKey, { preview } satisfies AiHighlightMeta),
+  );
+}
+
+/** The last inline position of a block (its end before the closing tokens). */
+function contentEnd(node: PMNode, pos: number): number {
+  let end = pos + node.nodeSize - 1;
+  let current = node;
+  while (!current.isTextblock && current.lastChild && !current.lastChild.isInline) {
+    current = current.lastChild;
+    end -= 1;
+  }
+  return end;
+}
+
+function aiDecorations(state: EditorState): DecorationSet {
+  const plugin = aiHighlightKey.getState(state);
+  const range = plugin?.range;
+  if (!range) return DecorationSet.empty;
+  const { from, to } = range;
+  const decorations: Decoration[] = [];
+
+  if (!plugin.preview) {
+    if (from < to) {
+      decorations.push(Decoration.inline(from, to, { class: "ai-target" }));
+    }
+    return DecorationSet.create(state.doc, decorations);
+  }
+
+  decorations.push(
+    Decoration.widget(from, plugin.preview, {
+      side: -1,
+      key: `ai-preview-${plugin.version}`,
+      ignoreSelection: true,
+    }),
+  );
+  if (from < to) {
+    decorations.push(Decoration.inline(from, to, { class: "ai-replaced" }));
+    // Blocks after the first one that the range fully covers: hide them too,
+    // so that their margins and list markers go away.
+    const firstBlockEnd = state.doc.resolve(from).end();
+    state.doc.nodesBetween(from, to, (node, pos) => {
+      if (!node.isBlock || pos < firstBlockEnd) return true;
+      if (contentEnd(node, pos) > to) return true;
+      decorations.push(
+        Decoration.node(pos, pos + node.nodeSize, { class: "ai-replaced" }),
+      );
+      return false;
+    });
+  }
+  return DecorationSet.create(state.doc, decorations);
+}
+
+/** Keeps the AI target visible, and shows the streaming answer in its place. */
 export const AiHighlight = Extension.create({
   name: "aiHighlight",
   addProseMirrorPlugins() {
     return [
-      new Plugin<DecorationSet>({
+      new Plugin<AiHighlightState>({
         key: aiHighlightKey,
         state: {
-          init: () => DecorationSet.empty,
-          apply(tr, set) {
-            const range = tr.getMeta(aiHighlightKey) as Range | null | undefined;
-            if (range === undefined) return set.map(tr.mapping, tr.doc);
-            if (range === null) return DecorationSet.empty;
-            return DecorationSet.create(tr.doc, [
-              Decoration.inline(range.from, range.to, { class: "ai-target" }),
-            ]);
+          init: () => ({ range: null, preview: null, version: 0 }),
+          apply(tr, value) {
+            const meta = tr.getMeta(aiHighlightKey) as AiHighlightMeta | undefined;
+            if (!meta) {
+              if (!value.range || !tr.docChanged) return value;
+              return {
+                ...value,
+                range: {
+                  from: tr.mapping.map(value.range.from),
+                  to: tr.mapping.map(value.range.to),
+                },
+              };
+            }
+            if ("range" in meta) {
+              return { range: meta.range, preview: null, version: value.version };
+            }
+            return {
+              ...value,
+              preview: meta.preview,
+              version: value.version + 1,
+            };
           },
         },
         props: {
-          decorations: (state) => aiHighlightKey.getState(state),
+          decorations: aiDecorations,
         },
       }),
     ];
@@ -111,6 +199,27 @@ function renderMarkdown(
   }
 }
 
+/**
+ * The paragraph of a one-paragraph answer when it can replace inline text
+ * (the range is in one text block), so the block is not split.
+ */
+function inlineParagraph(
+  editor: TiptapEditor,
+  range: Range,
+  content: Fragment,
+): PMNode | null {
+  const { doc } = editor.state;
+  const $from = doc.resolve(range.from);
+  const $to = doc.resolve(range.to);
+  const single = content.childCount === 1 ? content.firstChild : null;
+  return single?.type.name === "paragraph" &&
+    $from.parent.isTextblock &&
+    !$from.parent.type.spec.code &&
+    $from.sameParent($to)
+    ? single
+    : null;
+}
+
 /** Inserts the markdown as editor nodes in one transaction (one undo step). */
 function applyMarkdown(
   editor: TiptapEditor,
@@ -118,30 +227,64 @@ function applyMarkdown(
   markdown: string,
   action: AiApplyAction,
 ) {
-  let content = parseMarkdown(editor, markdown);
-  const { doc } = editor.state;
+  const content = parseMarkdown(editor, markdown);
 
   if (action === "below") {
-    const $to = doc.resolve(range.to);
+    const $to = editor.state.doc.resolve(range.to);
     const pos = $to.depth > 0 ? $to.after(1) : range.to;
     editor.chain().focus().insertContentAt(pos, content).run();
     return;
   }
 
-  // A one-paragraph answer inside one text block replaces inline text,
-  // so the block is not split.
-  const $from = doc.resolve(range.from);
-  const $to = doc.resolve(range.to);
-  const single = content.childCount === 1 ? content.firstChild : null;
-  if (
-    single?.type.name === "paragraph" &&
-    $from.parent.isTextblock &&
-    !$from.parent.type.spec.code &&
-    $from.sameParent($to)
-  ) {
-    content = single.content;
-  }
-  editor.chain().focus().insertContentAt(range, content).run();
+  const paragraph = inlineParagraph(editor, range, content);
+  editor
+    .chain()
+    .focus()
+    .insertContentAt(range, paragraph ? paragraph.content : content)
+    .run();
+}
+
+/**
+ * Renders the streaming answer into one element that the editor shows in
+ * place of the range. A new element only when the shape changes (inline
+ * text or blocks); else its children change, without a transaction.
+ */
+function createPreview(editor: TiptapEditor, range: Range) {
+  let element: HTMLElement | null = null;
+  let inline = false;
+
+  return (markdown: string | null) => {
+    if (!markdown?.trim()) {
+      if (element) {
+        element = null;
+        setAiPreview(editor, null);
+      }
+      return;
+    }
+    let content: Fragment | null = null;
+    try {
+      content = parseMarkdown(editor, markdown);
+    } catch {
+      content = null;
+    }
+    const paragraph = content ? inlineParagraph(editor, range, content) : null;
+    const nextInline = !content || !!paragraph;
+    if (!element || inline !== nextInline) {
+      inline = nextInline;
+      element = document.createElement(inline ? "span" : "div");
+      element.className = "ai-insertion";
+      setAiPreview(editor, element);
+    }
+    if (!content) {
+      element.textContent = markdown;
+      return;
+    }
+    element.replaceChildren(
+      DOMSerializer.fromSchema(editor.schema).serializeFragment(
+        paragraph ? paragraph.content : content,
+      ),
+    );
+  };
 }
 
 /** The editor DOM, or null while the view is not mounted (no note open). */
@@ -162,15 +305,17 @@ const isAiShortcut = (e: KeyboardEvent) =>
 /** A fixed instruction that runs at once, for example from the selection menu. */
 export interface AiRun {
   instruction: string;
-  /** The answer is for reading (Explain): no "Replace selection". */
+  /** The answer is for reading (Explain): no "Apply". */
   readOnly?: boolean;
 }
 
+const MIN_MENU_WIDTH = 320;
+
 /**
- * Inline AI for the editor: Mod+J, the "/Ask AI" slash command, and the
- * popover that streams the pi response. Returns `openPopover` (empty
- * prompt), `runAi` (sends an instruction at once) and whether the popover
- * is open.
+ * Inline AI for the editor: Mod+J, the "/Ask AI" slash command, and the AI
+ * menu below the target block. The answer streams into the document as a
+ * preview. Returns `openPopover` (prompt input), `runAi` (sends an
+ * instruction at once) and whether the AI menu is open.
  */
 export function useAiAssist(editor: TiptapEditor | null) {
   const popupRef = useRef<TippyInstance | null>(null);
@@ -187,8 +332,10 @@ export function useAiAssist(editor: TiptapEditor | null) {
       popup.destroy();
       setPopoverOpen(false);
       if (!editor || editor.isDestroyed) return;
+      // Focus before the highlight goes away: the DOM selection is still in
+      // the highlighted text, so WebKit keeps it.
+      if (focusEditor) editor.view.focus();
       setAiHighlight(editor, null);
-      if (focusEditor) editor.commands.focus();
     },
     [editor],
   );
@@ -200,26 +347,48 @@ export function useAiAssist(editor: TiptapEditor | null) {
 
       const { from, to, empty } = editor.state.selection;
       const range = { from, to };
-      if (!empty) setAiHighlight(editor, range);
+      setAiHighlight(editor, range);
+      const preview = createPreview(editor, range);
+      const updatePosition = () => popupRef.current?.popperInstance?.update();
 
-      const props: AiPopoverProps = {
+      const props: AiMenuProps = {
         mode: empty ? "cursor" : "selection",
         context: buildContext(editor, range),
-        initialInstruction: initial?.instruction,
-        readOnly: !empty && initial?.readOnly,
+        initialRun: initial,
         renderMarkdown: (markdown, target) =>
           renderMarkdown(editor, markdown, target),
+        onPreview: (markdown) => {
+          preview(markdown);
+          updatePosition();
+        },
         onApply: (markdown, action) => {
           closePopover(false);
           applyMarkdown(editor, range, markdown, action);
         },
         onClose: () => closePopover(true),
-        onLayoutChange: () => popupRef.current?.popperInstance?.update(),
+        onLayoutChange: updatePosition,
       };
-      const component = new ReactRenderer(AiPopover, { props, editor });
+      const component = new ReactRenderer(AiMenu, { props, editor });
+
+      // Below the top-level block of the target, as wide as the block.
+      const anchorRect = () => {
+        const { view, state } = editor;
+        const $to = state.doc.resolve(Math.min(to, state.doc.content.size));
+        const block = $to.depth > 0 ? view.nodeDOM($to.before(1)) : null;
+        const rect =
+          block instanceof HTMLElement
+            ? block.getBoundingClientRect()
+            : posToDOMRect(view, from, to);
+        const width = Math.min(
+          Math.max(rect.width, MIN_MENU_WIDTH),
+          window.innerWidth - 16,
+        );
+        component.element.style.width = `${width}px`;
+        return rect;
+      };
 
       popupRef.current = tippy(document.body, {
-        getReferenceClientRect: () => posToDOMRect(editor.view, from, to),
+        getReferenceClientRect: anchorRect,
         appendTo: () => document.body,
         content: component.element,
         showOnCreate: true,
@@ -227,7 +396,7 @@ export function useAiAssist(editor: TiptapEditor | null) {
         trigger: "manual",
         hideOnClick: false,
         placement: "bottom-start",
-        offset: [0, 8],
+        offset: [0, 4],
         maxWidth: "none",
         popperOptions: {
           modifiers: [
@@ -238,7 +407,10 @@ export function useAiAssist(editor: TiptapEditor | null) {
             },
           ],
         },
-        onClickOutside: () => closePopover(false),
+        // The tone dropdown is in a portal: it is part of the AI menu.
+        onClickOutside: (_instance, event) => {
+          if (!isInMenuLayer(event.target as Node)) closePopover(false);
+        },
         onDestroy: () => component.destroy(),
       });
       setPopoverOpen(true);
@@ -256,7 +428,7 @@ export function useAiAssist(editor: TiptapEditor | null) {
 
   const openPopover = useCallback(() => open(), [open]);
 
-  // Close the popover (and stop pi) when the editor goes away.
+  // Close the AI menu (and stop pi) when the editor goes away.
   useEffect(() => () => closePopover(false), [closePopover]);
 
   // Mod+J in the editor
@@ -279,7 +451,7 @@ export function useAiAssist(editor: TiptapEditor | null) {
     return () => window.removeEventListener("slash-command-ai", handler);
   }, [openPopover]);
 
-  // Keep the popover at the selection while the note scrolls.
+  // Keep the AI menu at its block while the note scrolls.
   useEffect(() => {
     const onScroll = () => popupRef.current?.popperInstance?.update();
     document.addEventListener("scroll", onScroll, true);
