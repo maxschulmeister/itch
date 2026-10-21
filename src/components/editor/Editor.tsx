@@ -66,6 +66,7 @@ import { LinkEditor } from "./LinkEditor";
 import { SearchToolbar } from "./SearchToolbar";
 import { SlashCommand } from "./SlashCommand";
 import { AiHighlight, useAiAssist } from "./AiAssist";
+import { SelectionMenu } from "./SelectionMenu";
 import { Wikilink, type WikilinkStorage } from "./Wikilink";
 import { WikilinkSuggestion } from "./WikilinkSuggestion";
 import { EditorWidthHandles } from "./EditorWidthHandle";
@@ -1290,7 +1291,11 @@ export function Editor({
   // Track reloadVersion to detect manual refreshes
   const lastReloadVersionRef = useRef(0);
 
-  const openAiPopover = useAiAssist(editor);
+  const {
+    openPopover: openAiPopover,
+    runAi,
+    popoverOpen: aiPopoverOpen,
+  } = useAiAssist(editor);
 
   // Notify parent component when editor is ready
   useEffect(() => {
@@ -2709,6 +2714,14 @@ export function Editor({
                 }}
               >
                 <EditorContent editor={editor} className="h-full text-text" />
+                {editor && (
+                  <SelectionMenu
+                    editor={editor}
+                    aiOpen={aiPopoverOpen}
+                    onAddLink={handleAddLink}
+                    onRunAi={runAi}
+                  />
+                )}
               </div>
             </>
           )}

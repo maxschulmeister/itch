@@ -348,8 +348,8 @@ export function ToolsSettingsSection() {
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Ask AI</h2>
         <p className="text-sm text-text-muted mb-4">
-          Write and edit text with pi in the editor ({mod}J or the Ask AI
-          button on a selection)
+          Write and edit text with pi in the editor ({mod}J or the menu on
+          a selection)
         </p>
         <PiSettings />
       </section>

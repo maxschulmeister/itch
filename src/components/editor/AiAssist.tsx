@@ -1,9 +1,9 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Extension, posToDOMRect, type Editor as TiptapEditor } from "@tiptap/core";
 import { ReactRenderer } from "@tiptap/react";
 import type { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import { DOMSerializer } from "@tiptap/pm/model";
-import { Plugin, PluginKey, TextSelection, type Transaction } from "@tiptap/pm/state";
+import { Plugin, PluginKey, type Transaction } from "@tiptap/pm/state";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import tippy, { type Instance as TippyInstance } from "tippy.js";
 import {
@@ -12,12 +12,15 @@ import {
   type AiContext,
   type AiPopoverProps,
 } from "./AiPopover";
-import { SparklesIcon } from "../icons";
-import { mod } from "../../lib/platform";
 
 type Range = { from: number; to: number };
 
 const aiHighlightKey = new PluginKey<DecorationSet>("aiHighlight");
+
+/** Shows `range` as the AI target while the focus is outside the editor. */
+export function setAiHighlight(editor: TiptapEditor, range: Range | null) {
+  editor.view.dispatch(editor.state.tr.setMeta(aiHighlightKey, range));
+}
 
 /** Keeps the AI target range visible while focus is in the popover. */
 export const AiHighlight = Extension.create({
@@ -141,22 +144,6 @@ function applyMarkdown(
   editor.chain().focus().insertContentAt(range, content).run();
 }
 
-function AiBubbleButton({ onClick }: { onClick: () => void }) {
-  return (
-    <button
-      type="button"
-      // Keep the editor focus and selection.
-      onMouseDown={(e) => e.preventDefault()}
-      onClick={onClick}
-      title={`Ask AI (${mod}J)`}
-      className="flex items-center gap-1.5 h-7 px-2.5 text-sm font-medium text-text bg-bg border border-border rounded-lg shadow-md hover:bg-bg-muted transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-accent"
-    >
-      <SparklesIcon className="w-3.75 h-3.75 stroke-[1.5]" />
-      Ask AI
-    </button>
-  );
-}
-
 /** The editor DOM, or null while the view is not mounted (no note open). */
 function editorDom(editor: TiptapEditor): HTMLElement | null {
   try {
@@ -172,15 +159,23 @@ const isAiShortcut = (e: KeyboardEvent) =>
   !e.altKey &&
   e.key.toLowerCase() === "j";
 
+/** A fixed instruction that runs at once, for example from the selection menu. */
+export interface AiRun {
+  instruction: string;
+  /** The answer is for reading (Explain): no "Replace selection". */
+  readOnly?: boolean;
+}
+
 /**
- * Inline AI for the editor: the "Ask AI" bubble on a selection, Mod+J, the
- * "/Ask AI" slash command, and the popover that streams the pi response.
- * Returns the function that opens the popover (for the format bar button).
+ * Inline AI for the editor: Mod+J, the "/Ask AI" slash command, and the
+ * popover that streams the pi response. Returns `openPopover` (empty
+ * prompt), `runAi` (sends an instruction at once) and whether the popover
+ * is open.
  */
 export function useAiAssist(editor: TiptapEditor | null) {
   const popupRef = useRef<TippyInstance | null>(null);
-  const bubbleRef = useRef<TippyInstance | null>(null);
   const stopWatchingDocRef = useRef<(() => void) | null>(null);
+  const [popoverOpen, setPopoverOpen] = useState(false);
 
   const closePopover = useCallback(
     (focusEditor: boolean) => {
@@ -190,70 +185,76 @@ export function useAiAssist(editor: TiptapEditor | null) {
       if (!popup) return;
       popupRef.current = null;
       popup.destroy();
+      setPopoverOpen(false);
       if (!editor || editor.isDestroyed) return;
-      editor.view.dispatch(editor.state.tr.setMeta(aiHighlightKey, null));
+      setAiHighlight(editor, null);
       if (focusEditor) editor.commands.focus();
     },
     [editor],
   );
 
-  const openPopover = useCallback(() => {
-    if (!editor || !editor.isEditable) return;
-    closePopover(false);
-    bubbleRef.current?.hide();
+  const open = useCallback(
+    (initial?: AiRun) => {
+      if (!editor || !editor.isEditable) return;
+      closePopover(false);
 
-    const { from, to, empty } = editor.state.selection;
-    const range = { from, to };
-    if (!empty) {
-      editor.view.dispatch(editor.state.tr.setMeta(aiHighlightKey, range));
-    }
+      const { from, to, empty } = editor.state.selection;
+      const range = { from, to };
+      if (!empty) setAiHighlight(editor, range);
 
-    const props: AiPopoverProps = {
-      mode: empty ? "cursor" : "selection",
-      context: buildContext(editor, range),
-      renderMarkdown: (markdown, target) =>
-        renderMarkdown(editor, markdown, target),
-      onApply: (markdown, action) => {
-        closePopover(false);
-        applyMarkdown(editor, range, markdown, action);
-      },
-      onClose: () => closePopover(true),
-      onLayoutChange: () => popupRef.current?.popperInstance?.update(),
-    };
-    const component = new ReactRenderer(AiPopover, { props, editor });
+      const props: AiPopoverProps = {
+        mode: empty ? "cursor" : "selection",
+        context: buildContext(editor, range),
+        initialInstruction: initial?.instruction,
+        readOnly: !empty && initial?.readOnly,
+        renderMarkdown: (markdown, target) =>
+          renderMarkdown(editor, markdown, target),
+        onApply: (markdown, action) => {
+          closePopover(false);
+          applyMarkdown(editor, range, markdown, action);
+        },
+        onClose: () => closePopover(true),
+        onLayoutChange: () => popupRef.current?.popperInstance?.update(),
+      };
+      const component = new ReactRenderer(AiPopover, { props, editor });
 
-    popupRef.current = tippy(document.body, {
-      getReferenceClientRect: () => posToDOMRect(editor.view, from, to),
-      appendTo: () => document.body,
-      content: component.element,
-      showOnCreate: true,
-      interactive: true,
-      trigger: "manual",
-      hideOnClick: false,
-      placement: "bottom-start",
-      offset: [0, 8],
-      maxWidth: "none",
-      popperOptions: {
-        modifiers: [
-          { name: "flip", options: { fallbackPlacements: ["top-start"] } },
-          {
-            name: "preventOverflow",
-            options: { altAxis: true, tether: false, padding: 8 },
-          },
-        ],
-      },
-      onClickOutside: () => closePopover(false),
-      onDestroy: () => component.destroy(),
-    });
+      popupRef.current = tippy(document.body, {
+        getReferenceClientRect: () => posToDOMRect(editor.view, from, to),
+        appendTo: () => document.body,
+        content: component.element,
+        showOnCreate: true,
+        interactive: true,
+        trigger: "manual",
+        hideOnClick: false,
+        placement: "bottom-start",
+        offset: [0, 8],
+        maxWidth: "none",
+        popperOptions: {
+          modifiers: [
+            { name: "flip", options: { fallbackPlacements: ["top-start"] } },
+            {
+              name: "preventOverflow",
+              options: { altAxis: true, tether: false, padding: 8 },
+            },
+          ],
+        },
+        onClickOutside: () => closePopover(false),
+        onDestroy: () => component.destroy(),
+      });
+      setPopoverOpen(true);
 
-    // The stored range is only valid for this document: close on any change
-    // (external reload, note switch, undo from a menu).
-    const onTransaction = ({ transaction }: { transaction: Transaction }) => {
-      if (transaction.docChanged) closePopover(false);
-    };
-    editor.on("transaction", onTransaction);
-    stopWatchingDocRef.current = () => editor.off("transaction", onTransaction);
-  }, [editor, closePopover]);
+      // The stored range is only valid for this document: close on any change
+      // (external reload, note switch, undo from a menu).
+      const onTransaction = ({ transaction }: { transaction: Transaction }) => {
+        if (transaction.docChanged) closePopover(false);
+      };
+      editor.on("transaction", onTransaction);
+      stopWatchingDocRef.current = () => editor.off("transaction", onTransaction);
+    },
+    [editor, closePopover],
+  );
+
+  const openPopover = useCallback(() => open(), [open]);
 
   // Close the popover (and stop pi) when the editor goes away.
   useEffect(() => () => closePopover(false), [closePopover]);
@@ -278,87 +279,12 @@ export function useAiAssist(editor: TiptapEditor | null) {
     return () => window.removeEventListener("slash-command-ai", handler);
   }, [openPopover]);
 
-  // "Ask AI" bubble on a text selection
+  // Keep the popover at the selection while the note scrolls.
   useEffect(() => {
-    if (!editor) return;
-    // Created on the first show: a ReactRenderer made before the editor view
-    // is mounted never renders its component.
-    let component: ReactRenderer | null = null;
-    const bubble = tippy(document.body, {
-      appendTo: () => document.body,
-      interactive: true,
-      trigger: "manual",
-      hideOnClick: false,
-      placement: "top-start",
-      offset: [0, 8],
-    });
-    bubbleRef.current = bubble;
-    let pointerDown = false;
-
-    const update = () => {
-      const { selection } = editor.state;
-      const visible =
-        editorDom(editor) !== null &&
-        editor.isEditable &&
-        editor.isFocused &&
-        !pointerDown &&
-        !popupRef.current &&
-        selection instanceof TextSelection &&
-        !selection.empty &&
-        !editor.isActive("codeBlock") &&
-        !editor.isActive("frontmatter");
-      if (!visible) {
-        bubble.hide();
-        return;
-      }
-      if (!component) {
-        component = new ReactRenderer(AiBubbleButton, {
-          props: { onClick: openPopover },
-          editor,
-        });
-        bubble.setContent(component.element);
-      }
-      const { from, to } = selection;
-      bubble.setProps({
-        getReferenceClientRect: () => posToDOMRect(editor.view, from, to),
-      });
-      bubble.show();
-    };
-    // Show the bubble when the mouse selection is complete.
-    const onPointerDown = (e: PointerEvent) => {
-      if (!editorDom(editor)?.contains(e.target as Node)) return;
-      pointerDown = true;
-      bubble.hide();
-    };
-    const onPointerUp = () => {
-      if (!pointerDown) return;
-      pointerDown = false;
-      requestAnimationFrame(update);
-    };
-    const onBlur = () => bubble.hide();
-    const onScroll = () => {
-      bubble.popperInstance?.update();
-      popupRef.current?.popperInstance?.update();
-    };
-
-    editor.on("selectionUpdate", update);
-    editor.on("focus", update);
-    editor.on("blur", onBlur);
-    document.addEventListener("pointerdown", onPointerDown);
-    document.addEventListener("pointerup", onPointerUp);
+    const onScroll = () => popupRef.current?.popperInstance?.update();
     document.addEventListener("scroll", onScroll, true);
-    return () => {
-      editor.off("selectionUpdate", update);
-      editor.off("focus", update);
-      editor.off("blur", onBlur);
-      document.removeEventListener("pointerdown", onPointerDown);
-      document.removeEventListener("pointerup", onPointerUp);
-      document.removeEventListener("scroll", onScroll, true);
-      bubbleRef.current = null;
-      bubble.destroy();
-      component?.destroy();
-    };
-  }, [editor, openPopover]);
+    return () => document.removeEventListener("scroll", onScroll, true);
+  }, []);
 
-  return openPopover;
+  return { openPopover, runAi: open, popoverOpen };
 }

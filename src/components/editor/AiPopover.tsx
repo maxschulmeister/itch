@@ -47,6 +47,10 @@ function saveSetting(key: "piModel" | "piThinking", value: string) {
 export interface AiPopoverProps {
   mode: AiPopoverMode;
   context: AiContext;
+  /** Sent when the settings are loaded, without user input. */
+  initialInstruction?: string;
+  /** The answer is for reading (Explain): no "Replace selection". */
+  readOnly?: boolean;
   /** Renders markdown into `target` with the editor schema. */
   renderMarkdown: (markdown: string, target: HTMLElement) => void;
   onApply: (markdown: string, action: AiApplyAction) => void;
@@ -63,6 +67,8 @@ const FOOTER_SELECT =
 export const AiPopover = memo(function AiPopover({
   mode,
   context,
+  initialInstruction,
+  readOnly = false,
   renderMarkdown,
   onApply,
   onClose,
@@ -77,8 +83,13 @@ export const AiPopover = memo(function AiPopover({
   const [lastInstruction, setLastInstruction] = useState("");
   const [thinking, setThinking] = useState("");
   const [model, setModel] = useState("");
+  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
+    "idle",
+  );
   const [models] = usePiModels();
   const runIdRef = useRef(0);
+  const initialSentRef = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const previewRef = useRef<HTMLDivElement>(null);
@@ -112,7 +123,8 @@ export const AiPopover = memo(function AiPopover({
         setModel(settings.piModel ?? "");
         setThinking(settings.piThinking ?? "");
       })
-      .catch((err) => console.error("Failed to load the AI settings:", err));
+      .catch((err) => console.error("Failed to load the AI settings:", err))
+      .finally(() => setSettingsLoaded(true));
   }, []);
 
   const changeModel = useCallback((value: string) => {
@@ -170,6 +182,7 @@ export const AiPopover = memo(function AiPopover({
           ...context,
           thinking: effectiveThinking || undefined,
           model: model || undefined,
+          readOnly,
         },
         (event) => {
           if (runIdRef.current !== runId) return;
@@ -195,8 +208,25 @@ export const AiPopover = memo(function AiPopover({
         setStatus("error");
       });
     },
-    [sessionId, context, effectiveThinking, model],
+    [sessionId, context, effectiveThinking, model, readOnly],
   );
+
+  // A skill from the selection menu runs at once, with the saved settings.
+  useEffect(() => {
+    if (!settingsLoaded || !initialInstruction || initialSentRef.current) return;
+    initialSentRef.current = true;
+    run(initialInstruction);
+  }, [settingsLoaded, initialInstruction, run]);
+
+  const copy = useCallback(() => {
+    invoke("copy_to_clipboard", { text })
+      .then(() => setCopyState("copied"))
+      .catch((err) => {
+        console.error("Failed to copy the AI answer:", err);
+        setCopyState("failed");
+      })
+      .finally(() => setTimeout(() => setCopyState("idle"), 1500));
+  }, [text]);
 
   const submit = useCallback(() => {
     const instruction = prompt.trim();
@@ -303,7 +333,9 @@ export const AiPopover = memo(function AiPopover({
           aria-describedby={error ? "ai-popover-error" : undefined}
           placeholder={
             hasResult
-              ? "Tell AI what to change…"
+              ? readOnly
+                ? "Ask a follow-up question…"
+                : "Tell AI what to change…"
               : mode === "selection"
                 ? "Edit the selection, for example: make it shorter"
                 : "Write with AI, for example: continue writing"
@@ -378,7 +410,25 @@ export const AiPopover = memo(function AiPopover({
 
       {(status === "done" || status === "error") && (
         <div className="flex flex-wrap items-center gap-1">
-          {hasResult && mode === "selection" && (
+          {hasResult && readOnly && (
+            <>
+              <Button type="button" size="xs" variant="primary" onClick={copy}>
+                {copyState === "copied"
+                  ? "Copied"
+                  : copyState === "failed"
+                    ? "Unable to copy"
+                    : "Copy"}
+              </Button>
+              <Button
+                type="button"
+                size="xs"
+                onClick={() => onApply(text, "below")}
+              >
+                Insert below
+              </Button>
+            </>
+          )}
+          {hasResult && !readOnly && mode === "selection" && (
             <>
               <Button
                 type="button"
@@ -422,7 +472,7 @@ export const AiPopover = memo(function AiPopover({
       )}
 
       <p role="status" className="sr-only">
-        {statusMessage}
+        {copyState === "copied" ? "Copied" : statusMessage}
       </p>
     </div>
   );
