@@ -8,8 +8,9 @@ use serde_json::Value;
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
 
@@ -25,6 +26,10 @@ const SELECTION_END: &str = "⟦/selection⟧";
 const CURSOR: &str = "⟦cursor⟧";
 const NOT_FOUND: &str = "pi not found. Install pi or set its path in Settings.";
 const STDERR_TAIL_BYTES: usize = 4096;
+/// Time pi has to answer `get_available_models` or `set_model`.
+const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+/// pi thinking levels, from lowest to highest.
+const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
 /// Prompt input from the editor. `before` and `after` are the document
 /// markdown on each side of the selection (or cursor).
@@ -38,6 +43,76 @@ pub struct PromptRequest {
     /// Thinking level for this prompt. `None` keeps the current level.
     #[serde(default)]
     pub thinking: Option<String>,
+    /// Model as `provider/modelId` for this prompt. `None` keeps the current
+    /// model (the pi default for a new conversation).
+    #[serde(default)]
+    pub model: Option<String>,
+    /// The answer is for the user to read (for example an explanation). It
+    /// does not replace the selection.
+    #[serde(default)]
+    pub read_only: bool,
+}
+
+/// A model that pi can use, for the model select.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiModel {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+    pub thinking_levels: Vec<String>,
+}
+
+/// Splits `provider/modelId` at the first slash. Model ids can contain
+/// slashes (`nvidia/deepseek-ai/deepseek-v4.1-flash`).
+fn split_model(model: &str) -> Option<(&str, &str)> {
+    model
+        .split_once('/')
+        .filter(|(provider, id)| !provider.is_empty() && !id.is_empty())
+}
+
+/// The thinking levels that pi accepts for a model object. Same rule as
+/// `getSupportedThinkingLevels` in pi-ai: a `null` map entry removes a level,
+/// and `xhigh` and `max` need a map entry.
+fn thinking_levels(model: &Value) -> Vec<String> {
+    if model["reasoning"] != true {
+        return vec!["off".to_string()];
+    }
+    let map = &model["thinkingLevelMap"];
+    THINKING_LEVELS
+        .iter()
+        .filter(|level| match map.get(**level) {
+            Some(Value::Null) => false,
+            Some(_) => true,
+            None => !matches!(**level, "xhigh" | "max"),
+        })
+        .map(|level| level.to_string())
+        .collect()
+}
+
+/// Reads the `get_available_models` response. Skips entries without an id
+/// or provider.
+fn parse_models(response: &Value) -> Result<Vec<PiModel>, String> {
+    if response["success"] != true {
+        let error = response["error"].as_str().unwrap_or("unknown error");
+        return Err(format!("pi could not list the models: {error}"));
+    }
+    let models = response["data"]["models"]
+        .as_array()
+        .ok_or("pi returned no model list.")?;
+    Ok(models
+        .iter()
+        .filter_map(|model| {
+            let id = model["id"].as_str()?;
+            let provider = model["provider"].as_str()?;
+            Some(PiModel {
+                provider: provider.to_string(),
+                id: id.to_string(),
+                name: model["name"].as_str().unwrap_or(id).to_string(),
+                thinking_levels: thinking_levels(model),
+            })
+        })
+        .collect())
 }
 
 /// Event sent to the frontend for one prompt run.
@@ -56,6 +131,7 @@ enum Record {
     AssistantEnd { text: String, error: Option<String> },
     PromptAccepted,
     PromptRejected(String),
+    ModelSet(Result<(), String>),
     Settled { aborted: bool },
     Other,
 }
@@ -104,6 +180,16 @@ fn parse_record(line: &str) -> Record {
                 )
             }
         }
+        Some("response") if value["command"] == "set_model" => {
+            Record::ModelSet(if value["success"] == true {
+                Ok(())
+            } else {
+                Err(value["error"]
+                    .as_str()
+                    .unwrap_or("pi rejected the model.")
+                    .to_string())
+            })
+        }
         Some("agent_settled") => Record::Settled {
             aborted: value["aborted"] == true,
         },
@@ -135,13 +221,13 @@ impl RunTracker {
                     aborted,
                 },
             }),
-            Record::PromptAccepted | Record::Other => None,
+            Record::PromptAccepted | Record::ModelSet(_) | Record::Other => None,
         }
     }
 }
 
-pub fn build_args(model: Option<&str>) -> Vec<String> {
-    let mut args: Vec<String> = [
+pub fn build_args() -> Vec<String> {
+    [
         "--mode",
         "rpc",
         "--no-session",
@@ -159,12 +245,7 @@ pub fn build_args(model: Option<&str>) -> Vec<String> {
     ]
     .iter()
     .map(|arg| arg.to_string())
-    .collect();
-    if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
-        args.push("--model".to_string());
-        args.push(model.to_string());
-    }
-    args
+    .collect()
 }
 
 /// Keeps the text nearest to the selection: the end of `before` and the start
@@ -203,6 +284,13 @@ fn build_prompt(request: &PromptRequest, include_context: bool) -> String {
     }
     let (before, after) = truncate_context(&request.before, &request.after, CONTEXT_BUDGET_CHARS);
     match &request.selection {
+        Some(selection) if request.read_only => format!(
+            "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
+             The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
+             <selection>\n{selection}\n</selection>\n\n\
+             Instruction: {instruction}\n\n\
+             Reply with markdown for the user to read. Do not rewrite the selected text."
+        ),
         Some(selection) => format!(
             "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
              The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
@@ -263,6 +351,8 @@ struct RunSlot {
     exited: Option<String>,
     /// True after pi accepted the first prompt, which carries the context.
     context_sent: bool,
+    /// Receives the answer to the `set_model` command that is in progress.
+    model_reply: Option<mpsc::Sender<Result<(), String>>>,
 }
 
 /// One running `pi --mode rpc` process. Dropping it kills the process.
@@ -272,6 +362,8 @@ pub struct PiProcess {
     slot: Arc<Mutex<RunSlot>>,
     /// Last thinking level sent to pi. `None` until the first change.
     thinking: Option<String>,
+    /// Last model that pi accepted. `None` while pi uses its default.
+    model: Option<String>,
 }
 
 impl PiProcess {
@@ -302,6 +394,7 @@ impl PiProcess {
             stdin,
             slot,
             thinking: None,
+            model: None,
         })
     }
 
@@ -313,9 +406,28 @@ impl PiProcess {
     }
 
     /// Sends one prompt. Events for this run go to `sink` until a `Done` or
-    /// `Error` event.
+    /// `Error` event. When the model changes, the prompt waits until pi
+    /// accepts the model, so that the prompt never runs with another model.
     pub fn prompt(&mut self, request: &PromptRequest, sink: Sink) -> Result<(), String> {
-        let message = {
+        let model = request
+            .model
+            .as_deref()
+            .map(str::trim)
+            .filter(|model| !model.is_empty() && self.model.as_deref() != Some(*model));
+        let set_model = model
+            .map(|model| {
+                split_model(model)
+                    .map(|(provider, id)| {
+                        serde_json::json!({ "type": "set_model", "provider": provider, "modelId": id })
+                    })
+                    .ok_or_else(|| {
+                        format!(
+                            "Model \"{model}\" is not in the form provider/model. Choose a model in Settings."
+                        )
+                    })
+            })
+            .transpose()?;
+        let (message, model_reply) = {
             let mut slot = self.slot.lock().map_err(|_| "pi session is broken.")?;
             if let Some(message) = &slot.exited {
                 return Err(message.clone());
@@ -327,8 +439,38 @@ impl PiProcess {
                 sink,
                 tracker: RunTracker::default(),
             });
-            build_prompt(request, !slot.context_sent)
+            let model_reply = set_model.is_some().then(|| {
+                let (reply, receiver) = mpsc::channel();
+                slot.model_reply = Some(reply);
+                receiver
+            });
+            (build_prompt(request, !slot.context_sent), model_reply)
         };
+
+        if let (Some(model), Some(command), Some(reply)) = (model, set_model, model_reply) {
+            if let Err(e) = self.send(&command) {
+                self.clear_run();
+                return Err(format!("Failed to send the model to pi: {e}"));
+            }
+            match reply.recv_timeout(COMMAND_TIMEOUT) {
+                Ok(Ok(())) => {
+                    self.model = Some(model.to_string());
+                    // pi fits the thinking level to the new model.
+                    self.thinking = None;
+                }
+                Ok(Err(error)) => {
+                    self.fail_run(format!("pi could not use the model {model}: {error}"));
+                    return Ok(());
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    self.fail_run(format!("pi did not confirm the model {model} in time."));
+                    return Ok(());
+                }
+                // pi exited. The reader ended the run with an error event.
+                Err(mpsc::RecvTimeoutError::Disconnected) => return Ok(()),
+            }
+        }
+
         let level = request
             .thinking
             .as_deref()
@@ -340,15 +482,30 @@ impl PiProcess {
         }
         commands.push(serde_json::json!({ "type": "prompt", "message": message }));
         if let Err(e) = commands.iter().try_for_each(|command| self.send(command)) {
-            if let Ok(mut slot) = self.slot.lock() {
-                slot.active = None;
-            }
+            self.clear_run();
             return Err(format!("Failed to send the prompt to pi: {e}"));
         }
         if let Some(level) = level {
             self.thinking = Some(level.to_string());
         }
         Ok(())
+    }
+
+    fn clear_run(&self) {
+        if let Ok(mut slot) = self.slot.lock() {
+            slot.active = None;
+            slot.model_reply = None;
+        }
+    }
+
+    /// Ends the current run with an error event.
+    fn fail_run(&self, message: String) {
+        if let Ok(mut slot) = self.slot.lock() {
+            slot.model_reply = None;
+            if let Some(run) = slot.active.take() {
+                (run.sink)(PiEvent::Error { message });
+            }
+        }
     }
 
     /// Asks pi to abort the current run. pi then ends the run with
@@ -401,6 +558,12 @@ fn read_stdout(
         if record == Record::PromptAccepted {
             slot.context_sent = true;
         }
+        if let Record::ModelSet(result) = record {
+            if let Some(reply) = slot.model_reply.take() {
+                let _ = reply.send(result);
+            }
+            continue;
+        }
         let Some(run) = slot.active.as_mut() else {
             continue;
         };
@@ -421,8 +584,64 @@ fn read_stdout(
                 message: message.clone(),
             });
         }
+        slot.model_reply = None;
         slot.exited = Some(message);
     }
+}
+
+/// Starts a short-lived pi and asks it for the models it can use.
+fn list_models(program: &str, path_env: &str) -> Result<Vec<PiModel>, String> {
+    let mut child = no_window_cmd(program)
+        .args(build_args())
+        .env("PATH", path_env)
+        .current_dir(std::env::temp_dir())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("Failed to start pi: {e}"))?;
+    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+        (child.stdin.take(), child.stdout.take(), child.stderr.take())
+    else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Err("Failed to connect to pi.".to_string());
+    };
+    let stderr_reader = std::thread::spawn(move || read_stderr_tail(stderr));
+    let (reply, response) = mpsc::channel();
+    std::thread::spawn(move || {
+        for line in BufReader::new(stdout).split(b'\n') {
+            let Ok(bytes) = line else { break };
+            let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+                continue;
+            };
+            if value["type"] == "response" && value["command"] == "get_available_models" {
+                let _ = reply.send(value);
+                return;
+            }
+        }
+    });
+    // Keep stdin open until the answer: pi stops at the end of its input.
+    let sent = writeln!(
+        stdin,
+        "{}",
+        serde_json::json!({ "type": "get_available_models" })
+    );
+    let result = match sent {
+        Err(e) => Err(format!("Failed to ask pi for the models: {e}")),
+        Ok(()) => match response.recv_timeout(COMMAND_TIMEOUT) {
+            Ok(value) => parse_models(&value),
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                Err("pi did not list the models in time.".to_string())
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                Err(exit_message(&stderr_reader.join().unwrap_or_default()))
+            }
+        },
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    result
 }
 
 fn read_stderr_tail(mut stderr: std::process::ChildStderr) -> String {
@@ -457,6 +676,41 @@ struct Session {
     process: PiProcess,
 }
 
+/// The model list for one pi program, kept for the app session.
+#[derive(Default)]
+pub struct PiModels(Mutex<Option<(String, Vec<PiModel>)>>);
+
+/// Returns the models that pi can use. Asks pi once per app session.
+#[tauri::command]
+pub async fn pi_list_models(
+    app: AppHandle,
+    app_state: State<'_, AppState>,
+) -> Result<Vec<PiModel>, String> {
+    let path_override = app_state
+        .settings
+        .read()
+        .expect("settings read lock")
+        .pi_path
+        .clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let path = search_path();
+        let program = resolve_program(path_override.as_deref(), &path)?;
+        let cache = app.state::<PiModels>();
+        // Hold the lock while pi answers, so that one pi starts at a time.
+        let mut cached = cache.0.lock().map_err(|_| "pi model list is broken.")?;
+        if let Some((cached_program, models)) = cached.as_ref() {
+            if *cached_program == program {
+                return Ok(models.clone());
+            }
+        }
+        let models = list_models(&program, &path)?;
+        *cached = Some((program, models.clone()));
+        Ok(models)
+    })
+    .await
+    .map_err(|e| format!("Failed to run pi: {e}"))?
+}
+
 /// Open popover conversations, by session id.
 #[derive(Default)]
 pub struct PiSessions(Mutex<HashMap<String, Session>>);
@@ -471,10 +725,12 @@ pub async fn pi_prompt(
     request: PromptRequest,
     on_event: Channel<PiEvent>,
 ) -> Result<(), String> {
-    let (model, path_override) = {
-        let settings = app_state.settings.read().expect("settings read lock");
-        (settings.pi_model.clone(), settings.pi_path.clone())
-    };
+    let path_override = app_state
+        .settings
+        .read()
+        .expect("settings read lock")
+        .pi_path
+        .clone();
     let app = window.app_handle().clone();
     let label = window.label().to_string();
 
@@ -487,7 +743,7 @@ pub async fn pi_prompt(
             map.remove(&session_id);
             let path = search_path();
             let program = resolve_program(path_override.as_deref(), &path)?;
-            let process = PiProcess::spawn(&program, &build_args(model.as_deref()), &path)?;
+            let process = PiProcess::spawn(&program, &build_args(), &path)?;
             map.insert(
                 session_id.clone(),
                 Session {
@@ -570,7 +826,130 @@ mod tests {
             after: " outro.\n".to_string(),
             selection: selection.map(str::to_string),
             thinking: None,
+            model: None,
+            read_only: false,
         }
+    }
+
+    #[test]
+    fn splits_model_at_the_first_slash() {
+        assert_eq!(
+            split_model("openai-codex/gpt-5.5"),
+            Some(("openai-codex", "gpt-5.5"))
+        );
+        assert_eq!(
+            split_model("nvidia/deepseek-ai/deepseek-v4.1-flash"),
+            Some(("nvidia", "deepseek-ai/deepseek-v4.1-flash"))
+        );
+        assert_eq!(split_model("gpt-5.5"), None);
+        assert_eq!(split_model("/gpt-5.5"), None);
+        assert_eq!(split_model("openai-codex/"), None);
+    }
+
+    fn levels(model: Value) -> Vec<String> {
+        thinking_levels(&model)
+    }
+
+    #[test]
+    fn model_without_reasoning_has_only_off() {
+        assert_eq!(levels(serde_json::json!({ "reasoning": false })), ["off"]);
+        assert_eq!(levels(serde_json::json!({})), ["off"]);
+    }
+
+    #[test]
+    fn reasoning_model_without_map_has_off_to_high() {
+        assert_eq!(
+            levels(serde_json::json!({ "reasoning": true })),
+            ["off", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[test]
+    fn null_in_the_map_removes_a_level_and_xhigh_max_need_an_entry() {
+        // Values from pi 1.3.0, checked against get_available_thinking_levels.
+        assert_eq!(
+            levels(serde_json::json!({
+                "reasoning": true,
+                "thinkingLevelMap": { "off": null, "xhigh": "xhigh", "max": "max" }
+            })),
+            ["minimal", "low", "medium", "high", "xhigh", "max"]
+        );
+        assert_eq!(
+            levels(serde_json::json!({
+                "reasoning": true,
+                "thinkingLevelMap": { "minimal": null, "low": null, "medium": null, "high": "high", "max": "max" }
+            })),
+            ["off", "high", "max"]
+        );
+        assert_eq!(
+            levels(serde_json::json!({
+                "reasoning": true,
+                "thinkingLevelMap": { "off": "none", "xhigh": null, "max": "max", "minimal": "low" }
+            })),
+            ["off", "minimal", "low", "medium", "high", "max"]
+        );
+    }
+
+    #[test]
+    fn parses_the_model_list_response() {
+        let response = serde_json::json!({
+            "type": "response",
+            "command": "get_available_models",
+            "success": true,
+            "data": { "models": [
+                { "id": "gpt-5.5", "name": "GPT-5.5", "provider": "openai-codex", "reasoning": true,
+                  "thinkingLevelMap": { "xhigh": "xhigh" } },
+                { "id": "glm-4.7", "provider": "zai", "reasoning": false },
+                { "name": "no id", "provider": "zai" }
+            ] }
+        });
+        assert_eq!(
+            parse_models(&response),
+            Ok(vec![
+                PiModel {
+                    provider: "openai-codex".to_string(),
+                    id: "gpt-5.5".to_string(),
+                    name: "GPT-5.5".to_string(),
+                    thinking_levels: ["off", "minimal", "low", "medium", "high", "xhigh"]
+                        .map(String::from)
+                        .to_vec(),
+                },
+                PiModel {
+                    provider: "zai".to_string(),
+                    id: "glm-4.7".to_string(),
+                    name: "glm-4.7".to_string(),
+                    thinking_levels: vec!["off".to_string()],
+                },
+            ])
+        );
+    }
+
+    #[test]
+    fn model_list_failure_returns_the_pi_error() {
+        let response = serde_json::json!({
+            "type": "response",
+            "command": "get_available_models",
+            "success": false,
+            "error": "boom"
+        });
+        assert_eq!(
+            parse_models(&response),
+            Err("pi could not list the models: boom".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_set_model_responses() {
+        assert_eq!(
+            parse_record(r#"{"type":"response","command":"set_model","success":true,"data":{}}"#),
+            Record::ModelSet(Ok(()))
+        );
+        assert_eq!(
+            parse_record(
+                r#"{"type":"response","command":"set_model","success":false,"error":"Model not found: nope/x"}"#
+            ),
+            Record::ModelSet(Err("Model not found: nope/x".to_string()))
+        );
     }
 
     #[test]
@@ -728,7 +1107,7 @@ mod tests {
 
     #[test]
     fn args_use_minimal_fixed_setup() {
-        let args = build_args(None);
+        let args = build_args();
         for flag in [
             "--no-session",
             "--no-tools",
@@ -748,15 +1127,6 @@ mod tests {
         assert!(args[prompt_index + 1].contains("Output only the resulting markdown"));
         assert!(!args.iter().any(|a| a == "--model"));
     }
-
-    #[test]
-    fn args_add_model_only_when_set() {
-        assert!(!build_args(Some("  ")).iter().any(|a| a == "--model"));
-        let args = build_args(Some(" anthropic/claude-sonnet-4-5 "));
-        let index = args.iter().position(|a| a == "--model").unwrap();
-        assert_eq!(args[index + 1], "anthropic/claude-sonnet-4-5");
-    }
-
 
     #[test]
     fn context_is_unchanged_within_budget() {
@@ -805,6 +1175,18 @@ mod tests {
         assert!(!prompt.contains("<selection>"));
         assert!(prompt.contains("Instruction: Make it shorter"));
         assert!(prompt.contains("insert at the cursor"));
+    }
+
+    #[test]
+    fn read_only_prompt_asks_for_an_answer_about_the_selection() {
+        let req = PromptRequest {
+            read_only: true,
+            ..request(Some("old text"))
+        };
+        let prompt = build_prompt(&req, true);
+        assert!(prompt.contains("<selection>\nold text\n</selection>"));
+        assert!(prompt.contains("Do not rewrite the selected text"));
+        assert!(!prompt.contains("replaces the selected text"));
     }
 
     #[test]
@@ -903,17 +1285,7 @@ sleep 30"#,
     fn process_sets_thinking_level_before_prompt_when_it_changes() {
         let log = std::env::temp_dir().join(format!("scratch-fake-pi-log-{}", std::process::id()));
         let _ = std::fs::remove_file(&log);
-        let (_script, program) = fake_pi(&format!(
-            r#"while read line; do
-printf '%s\n' "$line" >> '{}'
-case "$line" in *'"type":"prompt"'*)
-printf '%s\n' '{{"type":"response","command":"prompt","success":true}}'
-printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"stopReason":"stop"}}}}'
-printf '%s\n' '{{"type":"agent_settled","aborted":false}}';;
-esac
-done"#,
-            log.display()
-        ));
+        let (_script, program) = logging_fake_pi(&log, "");
         let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
         for thinking in [Some("low"), Some("low"), None, Some("high")] {
             let (sink, rx) = channel_sink();
@@ -924,20 +1296,8 @@ done"#,
             process.prompt(&req, sink).unwrap();
             collect_run(&rx);
         }
-        let sent: Vec<String> = std::fs::read_to_string(&log)
-            .unwrap()
-            .lines()
-            .map(|line| {
-                let value: Value = serde_json::from_str(line).unwrap();
-                match value["level"].as_str() {
-                    Some(level) => format!("{}:{level}", value["type"].as_str().unwrap()),
-                    None => value["type"].as_str().unwrap().to_string(),
-                }
-            })
-            .collect();
-        let _ = std::fs::remove_file(&log);
         assert_eq!(
-            sent,
+            read_command_log(&log),
             [
                 "set_thinking_level:low",
                 "prompt",
@@ -946,6 +1306,175 @@ done"#,
                 "set_thinking_level:high",
                 "prompt"
             ]
+        );
+    }
+
+    /// A fake pi that logs each command and answers set_model with
+    /// `set_model_reply` and each prompt with a short run.
+    #[cfg(unix)]
+    fn logging_fake_pi(
+        log: &std::path::Path,
+        set_model_reply: &str,
+    ) -> (tempfile_path::TempScript, String) {
+        fake_pi(&format!(
+            r#"while read line; do
+printf '%s\n' "$line" >> '{}'
+case "$line" in
+*'"type":"set_model"'*)
+printf '%s\n' '{set_model_reply}';;
+*'"type":"prompt"'*)
+printf '%s\n' '{{"type":"response","command":"prompt","success":true}}'
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"stopReason":"stop"}}}}'
+printf '%s\n' '{{"type":"agent_settled","aborted":false}}';;
+esac
+done"#,
+            log.display()
+        ))
+    }
+
+    /// The sent commands as `type[:detail]` strings.
+    fn read_command_log(log: &std::path::Path) -> Vec<String> {
+        let sent = std::fs::read_to_string(log)
+            .unwrap_or_default()
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).unwrap();
+                let kind = value["type"].as_str().unwrap();
+                match (value["level"].as_str(), value["provider"].as_str()) {
+                    (Some(level), _) => format!("{kind}:{level}"),
+                    (_, Some(provider)) => {
+                        format!("{kind}:{provider}|{}", value["modelId"].as_str().unwrap())
+                    }
+                    _ => kind.to_string(),
+                }
+            })
+            .collect();
+        let _ = std::fs::remove_file(log);
+        sent
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_sets_model_before_thinking_and_prompt_when_it_changes() {
+        let log =
+            std::env::temp_dir().join(format!("scratch-fake-pi-model-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let (_script, program) = logging_fake_pi(
+            &log,
+            r#"{"type":"response","command":"set_model","success":true,"data":{}}"#,
+        );
+        let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
+        for model in [
+            Some("openai-codex/gpt-5.5"),
+            Some("openai-codex/gpt-5.5"),
+            None,
+            Some("nvidia/deepseek-ai/deepseek-v4.1-flash"),
+        ] {
+            let (sink, rx) = channel_sink();
+            let req = PromptRequest {
+                model: model.map(str::to_string),
+                thinking: Some("low".to_string()),
+                ..request(None)
+            };
+            process.prompt(&req, sink).unwrap();
+            assert!(matches!(collect_run(&rx).1, PiEvent::Done { .. }));
+        }
+        assert_eq!(
+            read_command_log(&log),
+            [
+                "set_model:openai-codex|gpt-5.5",
+                "set_thinking_level:low",
+                "prompt",
+                "prompt",
+                "prompt",
+                // pi clamps the level to the model: send it again.
+                "set_model:nvidia|deepseek-ai/deepseek-v4.1-flash",
+                "set_thinking_level:low",
+                "prompt"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_ends_run_with_error_when_set_model_fails() {
+        let log =
+            std::env::temp_dir().join(format!("scratch-fake-pi-badmodel-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let (_script, program) = logging_fake_pi(
+            &log,
+            r#"{"type":"response","command":"set_model","success":false,"error":"Model not found: nope/x"}"#,
+        );
+        let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
+        for _ in 0..2 {
+            let (sink, rx) = channel_sink();
+            let req = PromptRequest {
+                model: Some("nope/x".to_string()),
+                thinking: Some("low".to_string()),
+                ..request(None)
+            };
+            process.prompt(&req, sink).unwrap();
+            assert_eq!(
+                collect_run(&rx).1,
+                PiEvent::Error {
+                    message: "pi could not use the model nope/x: Model not found: nope/x"
+                        .to_string()
+                }
+            );
+        }
+        // No prompt runs with another model, and the next prompt tries again.
+        assert_eq!(
+            read_command_log(&log),
+            ["set_model:nope|x", "set_model:nope|x"]
+        );
+        assert!(process.is_alive());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn process_rejects_a_model_without_provider() {
+        let (_script, program) = fake_pi("while read line; do :; done");
+        let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
+        let (sink, _rx) = channel_sink();
+        let req = PromptRequest {
+            model: Some("gpt-5.5".to_string()),
+            ..request(None)
+        };
+        assert_eq!(
+            process.prompt(&req, sink),
+            Err(
+                "Model \"gpt-5.5\" is not in the form provider/model. Choose a model in Settings."
+                    .to_string()
+            )
+        );
+        assert!(process.slot.lock().unwrap().active.is_none());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_models_reads_the_response_and_stops_pi() {
+        let (_script, program) = fake_pi(
+            r#"read line
+case "$line" in *'"type":"get_available_models"'*)
+printf '%s\n' '{"type":"agent_start"}'
+printf '%s\n' '{"type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"gpt-5.5","name":"GPT-5.5","provider":"openai-codex","reasoning":false}]}}';;
+esac
+sleep 30"#,
+        );
+        let started = std::time::Instant::now();
+        let models = list_models(&program, &get_expanded_path()).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(models.len(), 1);
+        assert_eq!(models[0].id, "gpt-5.5");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_models_reports_pi_exit() {
+        let (_script, program) = fake_pi(r#"echo 'Error: bad config' >&2; exit 1"#);
+        assert_eq!(
+            list_models(&program, &get_expanded_path()),
+            Err("pi stopped unexpectedly: Error: bad config".to_string())
         );
     }
 
@@ -988,6 +1517,44 @@ done"#,
         assert!(!still_running);
     }
 
+    /// End-to-end check of the model list and `set_model` with the real pi.
+    /// Run with: PI_TEST_MODEL=openai-codex/gpt-5.5 cargo test --lib
+    /// pi::tests::real_pi_lists -- --ignored --nocapture
+    #[test]
+    #[ignore = "needs a real pi install and model credentials"]
+    fn real_pi_lists_models_and_switches_model() {
+        let path = search_path();
+        let program = resolve_program(None, &path).expect("pi on PATH");
+        let models = list_models(&program, &path).unwrap();
+        println!("{} models", models.len());
+        let model = std::env::var("PI_TEST_MODEL").expect("PI_TEST_MODEL");
+        assert!(models
+            .iter()
+            .any(|m| format!("{}/{}", m.provider, m.id) == model));
+
+        let mut process = PiProcess::spawn(&program, &build_args(), &path).unwrap();
+        let (sink, rx) = channel_sink();
+        let missing = PromptRequest {
+            model: Some("nope/missing-model".to_string()),
+            ..request(Some("Cats sleep."))
+        };
+        process.prompt(&missing, sink).unwrap();
+        let (_, end) = collect_run(&rx);
+        println!("missing model: {end:?}");
+        assert!(matches!(end, PiEvent::Error { .. }));
+
+        let (sink, rx) = channel_sink();
+        let req = PromptRequest {
+            model: Some(model),
+            thinking: Some("low".to_string()),
+            ..request(Some("Cats sleeps a lot."))
+        };
+        process.prompt(&req, sink).unwrap();
+        let (streamed, end) = collect_run(&rx);
+        println!("model: {streamed:?} / {end:?}");
+        assert!(matches!(end, PiEvent::Done { aborted: false, .. }));
+    }
+
     /// End-to-end check with the real pi and its default model.
     /// Run with: cargo test --lib pi::tests::real_pi -- --ignored --nocapture
     #[test]
@@ -995,15 +1562,18 @@ done"#,
     fn real_pi_streams_refines_and_aborts() {
         let path = search_path();
         let program = resolve_program(None, &path).expect("pi on PATH");
-        let mut process = PiProcess::spawn(&program, &build_args(None), &path).unwrap();
+        let mut process = PiProcess::spawn(&program, &build_args(), &path).unwrap();
 
         let (sink, rx) = channel_sink();
+        // Set PI_TEST_MODEL (provider/model) to test with a model that is not the default.
         let first = PromptRequest {
             instruction: "Continue writing with one short sentence.".to_string(),
             before: "# Cats\n\nCats sleep a lot. ".to_string(),
             after: String::new(),
             selection: None,
             thinking: None,
+            model: std::env::var("PI_TEST_MODEL").ok(),
+            read_only: false,
         };
         process.prompt(&first, sink).unwrap();
         let (streamed, end) = collect_run(&rx);

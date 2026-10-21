@@ -139,7 +139,7 @@ pub struct Settings {
     pub sidebar_width_px: Option<u32>,
     #[serde(rename = "ollamaModel")]
     pub ollama_model: Option<String>,
-    /// Model for the inline AI popover (`pi --model`); `None` uses pi's default.
+    /// Model for the inline AI popover as `provider/modelId`; `None` uses pi's default.
     #[serde(rename = "piModel")]
     pub pi_model: Option<String>,
     /// Thinking level for the inline AI popover (`pi --thinking`); `None` uses pi's default.
@@ -3830,6 +3830,7 @@ pub fn run() {
             };
             app.manage(state);
             app.manage(pi::PiSessions::default());
+            app.manage(pi::PiModels::default());
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
@@ -3940,6 +3941,7 @@ pub fn run() {
             ai_execute_opencode,
             ai_execute_ollama,
             pi::pi_prompt,
+            pi::pi_list_models,
             pi::pi_abort,
             pi::pi_close,
             read_file_direct,
