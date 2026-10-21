@@ -15,6 +15,7 @@ import * as aiService from "../../services/ai";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
+import { PI_THINKING_LEVELS } from "../../services/pi";
 import type { Settings } from "../../types/note";
 
 type CliState = {
@@ -97,17 +98,6 @@ const AI_PROVIDER_INFO: Record<
 
 type PiSettingKey = "piModel" | "piThinking" | "piPath";
 
-const PI_THINKING_OPTIONS = [
-  { value: "", label: "Default" },
-  { value: "off", label: "Off" },
-  { value: "minimal", label: "Minimal" },
-  { value: "low", label: "Low" },
-  { value: "medium", label: "Medium" },
-  { value: "high", label: "High" },
-  { value: "xhigh", label: "Extra high" },
-  { value: "max", label: "Max" },
-];
-
 function PiSettings() {
   const [values, setValues] = useState<Record<PiSettingKey, string>>({
     piModel: "",
@@ -181,7 +171,7 @@ function PiSettings() {
           }}
           className="w-64"
         >
-          {PI_THINKING_OPTIONS.map((opt) => (
+          {PI_THINKING_LEVELS.map((opt) => (
             <option key={opt.value} value={opt.value}>
               {opt.label}
             </option>
@@ -205,9 +195,10 @@ function PiSettings() {
         />
       </div>
       <p className="text-xs text-text-muted">
-        Leave the model empty to use the default model of pi. Default thinking
-        uses the level of pi. Lower levels give faster answers. Leave the path
-        empty to find pi on your PATH.
+        Leave the model empty to use the default model of pi. Thinking is the
+        start level for each new popover; you can also change it in the
+        popover. Lower levels give faster answers. Leave the path empty to find
+        pi on your PATH.
       </p>
     </div>
   );

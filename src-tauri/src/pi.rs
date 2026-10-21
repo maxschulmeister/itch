@@ -35,6 +35,9 @@ pub struct PromptRequest {
     pub after: String,
     /// Selected text as markdown. `None` in cursor mode.
     pub selection: Option<String>,
+    /// Thinking level for this prompt. `None` keeps the current level.
+    #[serde(default)]
+    pub thinking: Option<String>,
 }
 
 /// Event sent to the frontend for one prompt run.
@@ -137,7 +140,7 @@ impl RunTracker {
     }
 }
 
-pub fn build_args(model: Option<&str>, thinking: Option<&str>) -> Vec<String> {
+pub fn build_args(model: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = [
         "--mode",
         "rpc",
@@ -160,10 +163,6 @@ pub fn build_args(model: Option<&str>, thinking: Option<&str>) -> Vec<String> {
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_string());
         args.push(model.to_string());
-    }
-    if let Some(thinking) = thinking.map(str::trim).filter(|t| !t.is_empty()) {
-        args.push("--thinking".to_string());
-        args.push(thinking.to_string());
     }
     args
 }
@@ -271,6 +270,8 @@ pub struct PiProcess {
     child: Child,
     stdin: ChildStdin,
     slot: Arc<Mutex<RunSlot>>,
+    /// Last thinking level sent to pi. `None` until the first change.
+    thinking: Option<String>,
 }
 
 impl PiProcess {
@@ -296,7 +297,12 @@ impl PiProcess {
         let stderr_reader = std::thread::spawn(move || read_stderr_tail(stderr));
         let reader_slot = Arc::clone(&slot);
         std::thread::spawn(move || read_stdout(stdout, stderr_reader, reader_slot));
-        Ok(Self { child, stdin, slot })
+        Ok(Self {
+            child,
+            stdin,
+            slot,
+            thinking: None,
+        })
     }
 
     fn is_alive(&self) -> bool {
@@ -323,12 +329,24 @@ impl PiProcess {
             });
             build_prompt(request, !slot.context_sent)
         };
-        let command = serde_json::json!({ "type": "prompt", "message": message });
-        if let Err(e) = self.send(&command) {
+        let level = request
+            .thinking
+            .as_deref()
+            .map(str::trim)
+            .filter(|level| !level.is_empty() && self.thinking.as_deref() != Some(*level));
+        let mut commands = Vec::with_capacity(2);
+        if let Some(level) = level {
+            commands.push(serde_json::json!({ "type": "set_thinking_level", "level": level }));
+        }
+        commands.push(serde_json::json!({ "type": "prompt", "message": message }));
+        if let Err(e) = commands.iter().try_for_each(|command| self.send(command)) {
             if let Ok(mut slot) = self.slot.lock() {
                 slot.active = None;
             }
             return Err(format!("Failed to send the prompt to pi: {e}"));
+        }
+        if let Some(level) = level {
+            self.thinking = Some(level.to_string());
         }
         Ok(())
     }
@@ -453,13 +471,9 @@ pub async fn pi_prompt(
     request: PromptRequest,
     on_event: Channel<PiEvent>,
 ) -> Result<(), String> {
-    let (model, thinking, path_override) = {
+    let (model, path_override) = {
         let settings = app_state.settings.read().expect("settings read lock");
-        (
-            settings.pi_model.clone(),
-            settings.pi_thinking.clone(),
-            settings.pi_path.clone(),
-        )
+        (settings.pi_model.clone(), settings.pi_path.clone())
     };
     let app = window.app_handle().clone();
     let label = window.label().to_string();
@@ -473,7 +487,7 @@ pub async fn pi_prompt(
             map.remove(&session_id);
             let path = search_path();
             let program = resolve_program(path_override.as_deref(), &path)?;
-            let process = PiProcess::spawn(&program, &build_args(model.as_deref(), thinking.as_deref()), &path)?;
+            let process = PiProcess::spawn(&program, &build_args(model.as_deref()), &path)?;
             map.insert(
                 session_id.clone(),
                 Session {
@@ -555,6 +569,7 @@ mod tests {
             before: "# Title\n\nIntro ".to_string(),
             after: " outro.\n".to_string(),
             selection: selection.map(str::to_string),
+            thinking: None,
         }
     }
 
@@ -713,7 +728,7 @@ mod tests {
 
     #[test]
     fn args_use_minimal_fixed_setup() {
-        let args = build_args(None, None);
+        let args = build_args(None);
         for flag in [
             "--no-session",
             "--no-tools",
@@ -736,20 +751,12 @@ mod tests {
 
     #[test]
     fn args_add_model_only_when_set() {
-        assert!(!build_args(Some("  "), None).iter().any(|a| a == "--model"));
-        let args = build_args(Some(" anthropic/claude-sonnet-4-5 "), None);
+        assert!(!build_args(Some("  ")).iter().any(|a| a == "--model"));
+        let args = build_args(Some(" anthropic/claude-sonnet-4-5 "));
         let index = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[index + 1], "anthropic/claude-sonnet-4-5");
     }
 
-    #[test]
-    fn args_add_thinking_only_when_set() {
-        assert!(!build_args(None, None).iter().any(|a| a == "--thinking"));
-        assert!(!build_args(None, Some(" ")).iter().any(|a| a == "--thinking"));
-        let args = build_args(None, Some("low"));
-        let index = args.iter().position(|a| a == "--thinking").unwrap();
-        assert_eq!(args[index + 1], "low");
-    }
 
     #[test]
     fn context_is_unchanged_within_budget() {
@@ -893,6 +900,57 @@ sleep 30"#,
 
     #[cfg(unix)]
     #[test]
+    fn process_sets_thinking_level_before_prompt_when_it_changes() {
+        let log = std::env::temp_dir().join(format!("scratch-fake-pi-log-{}", std::process::id()));
+        let _ = std::fs::remove_file(&log);
+        let (_script, program) = fake_pi(&format!(
+            r#"while read line; do
+printf '%s\n' "$line" >> '{}'
+case "$line" in *'"type":"prompt"'*)
+printf '%s\n' '{{"type":"response","command":"prompt","success":true}}'
+printf '%s\n' '{{"type":"message_end","message":{{"role":"assistant","content":[{{"type":"text","text":"ok"}}],"stopReason":"stop"}}}}'
+printf '%s\n' '{{"type":"agent_settled","aborted":false}}';;
+esac
+done"#,
+            log.display()
+        ));
+        let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
+        for thinking in [Some("low"), Some("low"), None, Some("high")] {
+            let (sink, rx) = channel_sink();
+            let req = PromptRequest {
+                thinking: thinking.map(str::to_string),
+                ..request(None)
+            };
+            process.prompt(&req, sink).unwrap();
+            collect_run(&rx);
+        }
+        let sent: Vec<String> = std::fs::read_to_string(&log)
+            .unwrap()
+            .lines()
+            .map(|line| {
+                let value: Value = serde_json::from_str(line).unwrap();
+                match value["level"].as_str() {
+                    Some(level) => format!("{}:{level}", value["type"].as_str().unwrap()),
+                    None => value["type"].as_str().unwrap().to_string(),
+                }
+            })
+            .collect();
+        let _ = std::fs::remove_file(&log);
+        assert_eq!(
+            sent,
+            [
+                "set_thinking_level:low",
+                "prompt",
+                "prompt",
+                "prompt",
+                "set_thinking_level:high",
+                "prompt"
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn process_exit_during_run_reports_stderr() {
         let (_script, program) = fake_pi(r#"echo 'Error: Model "x/y" not found.' >&2; exit 1"#);
         let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
@@ -937,7 +995,7 @@ sleep 30"#,
     fn real_pi_streams_refines_and_aborts() {
         let path = search_path();
         let program = resolve_program(None, &path).expect("pi on PATH");
-        let mut process = PiProcess::spawn(&program, &build_args(None, None), &path).unwrap();
+        let mut process = PiProcess::spawn(&program, &build_args(None), &path).unwrap();
 
         let (sink, rx) = channel_sink();
         let first = PromptRequest {
@@ -945,6 +1003,7 @@ sleep 30"#,
             before: "# Cats\n\nCats sleep a lot. ".to_string(),
             after: String::new(),
             selection: None,
+            thinking: None,
         };
         process.prompt(&first, sink).unwrap();
         let (streamed, end) = collect_run(&rx);

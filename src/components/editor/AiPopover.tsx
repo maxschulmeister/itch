@@ -7,18 +7,21 @@ import {
   useState,
   type KeyboardEvent,
 } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import { Button } from "../ui";
 import { SparklesIcon, SpinnerIcon } from "../icons";
 import {
   abortPi,
   closePiSession,
   promptPi,
+  PI_THINKING_LEVELS,
   type PiPromptRequest,
 } from "../../services/pi";
+import type { Settings } from "../../types/note";
 
 export type AiPopoverMode = "selection" | "cursor";
 export type AiApplyAction = "replace" | "below" | "insert";
-export type AiContext = Omit<PiPromptRequest, "instruction">;
+export type AiContext = Omit<PiPromptRequest, "instruction" | "thinking">;
 
 export interface AiPopoverProps {
   mode: AiPopoverMode;
@@ -48,6 +51,7 @@ export const AiPopover = memo(function AiPopover({
   const [error, setError] = useState<string | null>(null);
   const [aborted, setAborted] = useState(false);
   const [lastInstruction, setLastInstruction] = useState("");
+  const [thinking, setThinking] = useState("");
   const runIdRef = useRef(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -71,6 +75,25 @@ export const AiPopover = memo(function AiPopover({
     return () => cancelAnimationFrame(id);
   }, []);
 
+  // Start with the thinking level from the settings.
+  useEffect(() => {
+    invoke<Settings>("get_settings")
+      .then((settings) => setThinking(settings.piThinking ?? ""))
+      .catch((err) => console.error("Failed to load the thinking level:", err));
+  }, []);
+
+  // Keep the chosen level as the start level for the next popovers.
+  const changeThinking = useCallback((level: string) => {
+    setThinking(level);
+    invoke<Settings>("get_settings")
+      .then((settings) =>
+        invoke("update_settings", {
+          newSettings: { ...settings, piThinking: level || undefined },
+        }),
+      )
+      .catch((err) => console.error("Failed to save the thinking level:", err));
+  }, []);
+
   // Render the markdown at most once per frame while it streams.
   useEffect(() => {
     const target = previewRef.current;
@@ -92,7 +115,10 @@ export const AiPopover = memo(function AiPopover({
     const input = inputRef.current;
     if (!input) return;
     input.style.height = "auto";
-    input.style.height = `${input.scrollHeight}px`;
+    // scrollHeight is 0 before the popover is in the document.
+    if (input.scrollHeight > 0) {
+      input.style.height = `${input.scrollHeight}px`;
+    }
   }, [prompt]);
 
   const run = useCallback(
@@ -106,30 +132,34 @@ export const AiPopover = memo(function AiPopover({
       // The clicked button (Send, Try again) goes away: keep focus in the
       // popover so Esc still stops the run.
       inputRef.current?.focus();
-      promptPi(sessionId, { instruction, ...context }, (event) => {
-        if (runIdRef.current !== runId) return;
-        switch (event.type) {
-          case "delta":
-            setText((prev) => prev + event.text);
-            break;
-          case "done":
-            setText((prev) => event.text || prev);
-            setAborted(event.aborted);
-            setStatus("done");
-            inputRef.current?.focus();
-            break;
-          case "error":
-            setError(event.message);
-            setStatus("error");
-            break;
-        }
-      }).catch((err) => {
+      promptPi(
+        sessionId,
+        { instruction, ...context, thinking: thinking || undefined },
+        (event) => {
+          if (runIdRef.current !== runId) return;
+          switch (event.type) {
+            case "delta":
+              setText((prev) => prev + event.text);
+              break;
+            case "done":
+              setText((prev) => event.text || prev);
+              setAborted(event.aborted);
+              setStatus("done");
+              inputRef.current?.focus();
+              break;
+            case "error":
+              setError(event.message);
+              setStatus("error");
+              break;
+          }
+        },
+      ).catch((err) => {
         if (runIdRef.current !== runId) return;
         setError(String(err));
         setStatus("error");
       });
     },
-    [sessionId, context],
+    [sessionId, context, thinking],
   );
 
   const submit = useCallback(() => {
@@ -264,6 +294,23 @@ export const AiPopover = memo(function AiPopover({
             Send
           </Button>
         )}
+      </div>
+
+      <div className="flex items-center px-1 text-xs text-text-muted">
+        <label htmlFor="ai-popover-thinking">Thinking</label>
+        <select
+          id="ai-popover-thinking"
+          value={thinking}
+          onChange={(e) => changeThinking(e.target.value)}
+          disabled={busy}
+          className="ml-1 bg-transparent text-text-muted hover:text-text rounded px-1 py-0.5 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 [&>option]:bg-bg [&>option]:text-text"
+        >
+          {PI_THINKING_LEVELS.map((level) => (
+            <option key={level.value} value={level.value}>
+              {level.label}
+            </option>
+          ))}
+        </select>
       </div>
 
       {(status === "done" || status === "error") && (

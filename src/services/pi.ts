@@ -9,7 +9,21 @@ export interface PiPromptRequest {
   after: string;
   /** Selected text as markdown, or null in cursor mode. */
   selection: string | null;
+  /** Thinking level for this prompt. Omit to keep the current level. */
+  thinking?: string;
 }
+
+/** pi thinking levels. The empty value uses the default level of pi. */
+export const PI_THINKING_LEVELS = [
+  { value: "", label: "Default" },
+  { value: "off", label: "Off" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max" },
+];
 
 export type PiEvent =
   | { type: "delta"; text: string }
