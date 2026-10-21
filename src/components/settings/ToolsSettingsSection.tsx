@@ -16,6 +16,7 @@ import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
 import { PI_THINKING_LEVELS } from "../../services/pi";
+import { PiModelOptions, usePiModels } from "../ai/PiModelOptions";
 import type { Settings } from "../../types/note";
 
 type CliState = {
@@ -105,6 +106,7 @@ function PiSettings() {
     piPath: "",
   });
   const [saved, setSaved] = useState(values);
+  const [models, retryModels] = usePiModels();
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -130,13 +132,15 @@ function PiSettings() {
           newSettings: { ...settings, [key]: value || undefined },
         });
         setSaved((prev) => ({ ...prev, [key]: value }));
+        // Another pi can have other models.
+        if (key === "piPath") retryModels();
         toast.success("pi settings saved");
       } catch (error) {
         console.error("Failed to save pi settings:", error);
         toast.error("Unable to save pi settings");
       }
     },
-    [values, saved],
+    [values, saved, retryModels],
   );
 
   return (
@@ -145,18 +149,43 @@ function PiSettings() {
         <label htmlFor="pi-model" className="text-sm text-text font-medium">
           Model
         </label>
-        <Input
+        <Select
           id="pi-model"
           value={values.piModel}
-          onChange={(e) => setValues((v) => ({ ...v, piModel: e.target.value }))}
-          onBlur={() => save("piModel")}
-          placeholder="anthropic/claude-sonnet-4-5"
-          spellCheck={false}
-          autoCapitalize="off"
-          autoCorrect="off"
-          className="w-64 h-9 font-mono text-xs"
-        />
+          onChange={(e) => {
+            const value = e.target.value;
+            setValues((v) => ({ ...v, piModel: value }));
+            save("piModel", value);
+          }}
+          aria-describedby={
+            models.status === "error" ? "pi-model-error" : undefined
+          }
+          className="w-64"
+        >
+          <PiModelOptions state={models} value={values.piModel} />
+        </Select>
       </div>
+      {models.status === "loading" && (
+        <p className="flex items-center justify-end gap-2 text-xs text-text-muted">
+          <SpinnerIcon className="w-3 h-3 animate-spin motion-reduce:animate-none" />
+          Loading models from pi
+        </p>
+      )}
+      {models.status === "error" && (
+        <div className="flex items-start justify-between gap-4 bg-red-500/10 rounded-md px-3 py-2">
+          <p id="pi-model-error" className="text-xs text-red-500 break-words">
+            {models.message}
+          </p>
+          <Button
+            type="button"
+            variant="outline"
+            size="xs"
+            onClick={retryModels}
+          >
+            Try again
+          </Button>
+        </div>
+      )}
       <div className="flex items-center justify-between gap-4">
         <label htmlFor="pi-thinking" className="text-sm text-text font-medium">
           Thinking
@@ -195,10 +224,9 @@ function PiSettings() {
         />
       </div>
       <p className="text-xs text-text-muted">
-        Leave the model empty to use the default model of pi. Thinking is the
-        start level for each new popover; you can also change it in the
-        popover. Lower levels give faster answers. Leave the path empty to find
-        pi on your PATH.
+        Model and thinking are the start values for each new popover; you can
+        also change them in the popover. Lower thinking levels give faster
+        answers. Leave the path empty to find pi on your PATH.
       </p>
     </div>
   );

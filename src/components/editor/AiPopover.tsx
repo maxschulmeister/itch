@@ -13,15 +13,36 @@ import { SparklesIcon, SpinnerIcon } from "../icons";
 import {
   abortPi,
   closePiSession,
+  fitThinkingLevel,
   promptPi,
   PI_THINKING_LEVELS,
   type PiPromptRequest,
 } from "../../services/pi";
+import {
+  findPiModel,
+  PiModelOptions,
+  usePiModels,
+} from "../ai/PiModelOptions";
 import type { Settings } from "../../types/note";
 
 export type AiPopoverMode = "selection" | "cursor";
 export type AiApplyAction = "replace" | "below" | "insert";
-export type AiContext = Omit<PiPromptRequest, "instruction" | "thinking">;
+export type AiContext = Pick<PiPromptRequest, "before" | "after" | "selection">;
+
+const ALL_THINKING_LEVELS = PI_THINKING_LEVELS.map((l) => l.value).filter(
+  Boolean,
+);
+
+/** Saves one AI setting, so that the next popovers start with it. */
+function saveSetting(key: "piModel" | "piThinking", value: string) {
+  invoke<Settings>("get_settings")
+    .then((settings) =>
+      invoke("update_settings", {
+        newSettings: { ...settings, [key]: value || undefined },
+      }),
+    )
+    .catch((err) => console.error(`Failed to save ${key}:`, err));
+}
 
 export interface AiPopoverProps {
   mode: AiPopoverMode;
@@ -35,6 +56,9 @@ export interface AiPopoverProps {
 }
 
 type Status = "idle" | "streaming" | "stopping" | "done" | "error";
+
+const FOOTER_SELECT =
+  "ml-1 bg-transparent text-text-muted hover:text-text rounded px-1 py-0.5 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 [&_option]:bg-bg [&_option]:text-text";
 
 export const AiPopover = memo(function AiPopover({
   mode,
@@ -52,6 +76,8 @@ export const AiPopover = memo(function AiPopover({
   const [aborted, setAborted] = useState(false);
   const [lastInstruction, setLastInstruction] = useState("");
   const [thinking, setThinking] = useState("");
+  const [model, setModel] = useState("");
+  const [models] = usePiModels();
   const runIdRef = useRef(0);
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -59,6 +85,10 @@ export const AiPopover = memo(function AiPopover({
 
   const busy = status === "streaming" || status === "stopping";
   const hasResult = status === "done" && text.trim().length > 0;
+  // Without the model list (pi default, loading, error) pi fits the level.
+  const supportedLevels =
+    findPiModel(models, model)?.thinkingLevels ?? ALL_THINKING_LEVELS;
+  const effectiveThinking = fitThinkingLevel(thinking, supportedLevels);
 
   // One pi process per popover: stop it when the popover closes.
   useEffect(() => {
@@ -75,23 +105,24 @@ export const AiPopover = memo(function AiPopover({
     return () => cancelAnimationFrame(id);
   }, []);
 
-  // Start with the thinking level from the settings.
+  // Start with the model and thinking level from the settings.
   useEffect(() => {
     invoke<Settings>("get_settings")
-      .then((settings) => setThinking(settings.piThinking ?? ""))
-      .catch((err) => console.error("Failed to load the thinking level:", err));
+      .then((settings) => {
+        setModel(settings.piModel ?? "");
+        setThinking(settings.piThinking ?? "");
+      })
+      .catch((err) => console.error("Failed to load the AI settings:", err));
   }, []);
 
-  // Keep the chosen level as the start level for the next popovers.
+  const changeModel = useCallback((value: string) => {
+    setModel(value);
+    saveSetting("piModel", value);
+  }, []);
+
   const changeThinking = useCallback((level: string) => {
     setThinking(level);
-    invoke<Settings>("get_settings")
-      .then((settings) =>
-        invoke("update_settings", {
-          newSettings: { ...settings, piThinking: level || undefined },
-        }),
-      )
-      .catch((err) => console.error("Failed to save the thinking level:", err));
+    saveSetting("piThinking", level);
   }, []);
 
   // Render the markdown at most once per frame while it streams.
@@ -134,7 +165,12 @@ export const AiPopover = memo(function AiPopover({
       inputRef.current?.focus();
       promptPi(
         sessionId,
-        { instruction, ...context, thinking: thinking || undefined },
+        {
+          instruction,
+          ...context,
+          thinking: effectiveThinking || undefined,
+          model: model || undefined,
+        },
         (event) => {
           if (runIdRef.current !== runId) return;
           switch (event.type) {
@@ -159,7 +195,7 @@ export const AiPopover = memo(function AiPopover({
         setStatus("error");
       });
     },
-    [sessionId, context, thinking],
+    [sessionId, context, effectiveThinking, model],
   );
 
   const submit = useCallback(() => {
@@ -296,21 +332,48 @@ export const AiPopover = memo(function AiPopover({
         )}
       </div>
 
-      <div className="flex items-center px-1 text-xs text-text-muted">
-        <label htmlFor="ai-popover-thinking">Thinking</label>
-        <select
-          id="ai-popover-thinking"
-          value={thinking}
-          onChange={(e) => changeThinking(e.target.value)}
-          disabled={busy}
-          className="ml-1 bg-transparent text-text-muted hover:text-text rounded px-1 py-0.5 cursor-pointer outline-none focus-visible:ring-2 focus-visible:ring-accent disabled:cursor-not-allowed disabled:opacity-50 [&>option]:bg-bg [&>option]:text-text"
-        >
-          {PI_THINKING_LEVELS.map((level) => (
-            <option key={level.value} value={level.value}>
-              {level.label}
-            </option>
-          ))}
-        </select>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1 px-1 text-xs text-text-muted">
+        <div className="flex items-center min-w-0">
+          <label htmlFor="ai-popover-model">Model</label>
+          <select
+            id="ai-popover-model"
+            value={model}
+            onChange={(e) => changeModel(e.target.value)}
+            disabled={busy}
+            aria-describedby={
+              models.status === "error" ? "ai-popover-models-error" : undefined
+            }
+            className={`${FOOTER_SELECT} max-w-56 truncate`}
+          >
+            <PiModelOptions state={models} value={model} />
+          </select>
+        </div>
+        <div className="flex items-center">
+          <label htmlFor="ai-popover-thinking">Thinking</label>
+          <select
+            id="ai-popover-thinking"
+            value={effectiveThinking}
+            onChange={(e) => changeThinking(e.target.value)}
+            disabled={busy}
+            className={FOOTER_SELECT}
+          >
+            {PI_THINKING_LEVELS.filter(
+              (level) => !level.value || supportedLevels.includes(level.value),
+            ).map((level) => (
+              <option key={level.value} value={level.value}>
+                {level.label}
+              </option>
+            ))}
+          </select>
+        </div>
+        {models.status === "error" && (
+          <p
+            id="ai-popover-models-error"
+            className="basis-full text-red-500 break-words"
+          >
+            {models.message}
+          </p>
+        )}
       </div>
 
       {(status === "done" || status === "error") && (

@@ -11,6 +11,27 @@ export interface PiPromptRequest {
   selection: string | null;
   /** Thinking level for this prompt. Omit to keep the current level. */
   thinking?: string;
+  /** Model as "provider/modelId". Omit to keep the current model. */
+  model?: string;
+  /** The answer is for reading. It does not replace the selection. */
+  readOnly?: boolean;
+}
+
+/** A model that pi can use. */
+export interface PiModel {
+  provider: string;
+  id: string;
+  name: string;
+  /** Thinking levels that the model supports, from lowest to highest. */
+  thinkingLevels: string[];
+}
+
+/** The value for `PiPromptRequest.model` and the `piModel` setting. */
+export const piModelKey = (model: PiModel) => `${model.provider}/${model.id}`;
+
+/** The models of pi. The backend asks pi once per app session. */
+export function listPiModels(): Promise<PiModel[]> {
+  return invoke("pi_list_models");
 }
 
 /** pi thinking levels. The empty value uses the default level of pi. */
@@ -24,6 +45,23 @@ export const PI_THINKING_LEVELS = [
   { value: "xhigh", label: "Extra high" },
   { value: "max", label: "Max" },
 ];
+
+/**
+ * The supported level nearest to `level`: the next higher level, else the
+ * next lower level (the same rule as pi). The empty value (the pi default)
+ * is always supported.
+ */
+export function fitThinkingLevel(level: string, supported: string[]): string {
+  if (!level || supported.includes(level)) return level;
+  const order = PI_THINKING_LEVELS.map((l) => l.value).filter(Boolean);
+  const index = order.indexOf(level);
+  const higher = order.slice(index + 1).find((l) => supported.includes(l));
+  const lower = order
+    .slice(0, Math.max(index, 0))
+    .reverse()
+    .find((l) => supported.includes(l));
+  return higher ?? lower ?? "";
+}
 
 export type PiEvent =
   | { type: "delta"; text: string }
