@@ -1,4 +1,5 @@
 import {
+  Fragment,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,37 +14,49 @@ import type { ChainedCommands, Editor as TiptapEditor } from "@tiptap/core";
 import { TextSelection, type EditorState } from "@tiptap/pm/state";
 import { useEditorState } from "@tiptap/react";
 import { BubbleMenu } from "@tiptap/react/menus";
-import { Tooltip } from "../ui";
+import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
+import { TooltipContent, TooltipRoot, TooltipTrigger } from "../ui";
 import {
-  ArrowLeftIcon,
   BoldIcon,
-  CheckIcon,
   CheckSquareIcon,
-  ChevronRightIcon,
+  ChevronDownIcon,
   CodeIcon,
   Heading1Icon,
   Heading2Icon,
   Heading3Icon,
   Heading4Icon,
-  InfoIcon,
+  IndentDecreaseIcon,
+  IndentIncreaseIcon,
   InlineCodeIcon,
   ItalicIcon,
-  LanguagesIcon,
   LinkIcon,
   ListIcon,
   ListOrderedIcon,
-  MinusIcon,
-  PencilIcon,
-  PilcrowIcon,
-  PlusIcon,
+  MoreVerticalIcon,
   QuoteIcon,
   RemoveFormattingIcon,
   SparklesIcon,
   StrikethroughIcon,
+  TypeIcon,
 } from "../icons";
 import { isMac, mod, shift } from "../../lib/platform";
 import { cn } from "../../lib/utils";
 import { setAiHighlight, type AiRun } from "./AiAssist";
+import { IMPROVE_GROUPS, type AiSkill } from "./aiSkills";
+import {
+  isInMenuLayer,
+  MENU_BUTTON,
+  MENU_BUTTON_TEXT,
+  MENU_ICON,
+  MenuContent,
+  MenuItem,
+  MenuLabel,
+  MenuRadioItem,
+  MenuSeparator,
+  MenuSubContent,
+  MenuSubTrigger,
+  TOOLBAR_BOX,
+} from "./menuParts";
 
 type Icon = ComponentType<{ className?: string }>;
 
@@ -68,7 +81,7 @@ const heading = (level: 1 | 2 | 3 | 4, icon: Icon): BlockType => ({
 const BLOCK_TYPES: BlockType[] = [
   {
     label: "Text",
-    icon: PilcrowIcon,
+    icon: TypeIcon,
     isActive: (editor) => editor.isActive("paragraph"),
     apply: (chain) => chain,
   },
@@ -77,7 +90,7 @@ const BLOCK_TYPES: BlockType[] = [
   heading(3, Heading3Icon),
   heading(4, Heading4Icon),
   {
-    label: "Bullet list",
+    label: "Bulleted list",
     icon: ListIcon,
     isActive: (editor) => editor.isActive("bulletList"),
     wraps: true,
@@ -91,14 +104,14 @@ const BLOCK_TYPES: BlockType[] = [
     apply: (chain) => chain.toggleOrderedList(),
   },
   {
-    label: "Task list",
+    label: "To-do list",
     icon: CheckSquareIcon,
     isActive: (editor) => editor.isActive("taskList"),
     wraps: true,
     apply: (chain) => chain.toggleTaskList(),
   },
   {
-    label: "Quote",
+    label: "Blockquote",
     icon: QuoteIcon,
     isActive: (editor) => editor.isActive("blockquote"),
     wraps: true,
@@ -147,80 +160,23 @@ const MARKS: Mark[] = [
   },
   {
     name: "strike",
-    label: "Strikethrough",
+    label: "Strike",
     shortcut: `${mod}${sep}${shift}${sep}S`,
     icon: StrikethroughIcon,
     toggle: (chain) => chain.toggleStrike(),
   },
   {
     name: "code",
-    label: "Inline code",
+    label: "Code",
     shortcut: `${mod}${sep}E`,
     icon: InlineCodeIcon,
     toggle: (chain) => chain.toggleCode(),
   },
 ];
 
-interface Skill {
-  label: string;
-  icon: Icon;
-  run: AiRun | null;
-}
-
-const SKILLS: Skill[] = [
-  {
-    label: "Improve writing",
-    icon: PencilIcon,
-    run: {
-      instruction:
-        "Improve the writing: make it clearer and easier to read. Keep the meaning, the language and the markdown formatting.",
-    },
-  },
-  {
-    label: "Proofread",
-    icon: CheckIcon,
-    run: {
-      instruction:
-        "Correct the spelling, grammar and punctuation. Do not change anything else.",
-    },
-  },
-  {
-    label: "Make shorter",
-    icon: MinusIcon,
-    run: {
-      instruction:
-        "Make the text shorter. Keep the important points and the language.",
-    },
-  },
-  {
-    label: "Make longer",
-    icon: PlusIcon,
-    run: {
-      instruction:
-        "Make the text longer with more detail. Keep the tone and the language.",
-    },
-  },
-  {
-    label: "Summarize",
-    icon: ListIcon,
-    run: {
-      instruction: "Summarize the text. Use the language of the text.",
-    },
-  },
-  {
-    label: "Explain",
-    icon: InfoIcon,
-    run: {
-      instruction:
-        "Explain the text in simple words. Use the language of the text.",
-      readOnly: true,
-    },
-  },
-  // Fills the input; the user types the language.
-  { label: "Translate…", icon: LanguagesIcon, run: null },
-];
-
-const TRANSLATE_PREFIX = "Translate to ";
+/** The list item type at the selection, for the indent buttons. */
+const listItemType = (editor: TiptapEditor) =>
+  editor.isActive("taskItem") ? "taskItem" : "listItem";
 
 /** The selection menu shows only for text that the user can edit. */
 function hasEditableTextSelection(
@@ -238,101 +194,75 @@ function hasEditableTextSelection(
   );
 }
 
-/** Arrow keys, Home and End move the focus between the buttons of a list. */
-function moveFocus(e: ReactKeyboardEvent<HTMLElement>) {
-  const items = Array.from(
-    e.currentTarget.querySelectorAll<HTMLButtonElement>("button"),
-  );
-  const index = items.indexOf(document.activeElement as HTMLButtonElement);
-  const next =
-    e.key === "ArrowDown"
-      ? (index + 1) % items.length
-      : e.key === "ArrowUp"
-        ? (index - 1 + items.length) % items.length
-        : e.key === "Home"
-          ? 0
-          : e.key === "End"
-            ? items.length - 1
-            : -1;
-  if (next < 0) return;
-  e.preventDefault();
-  items[next]?.focus();
-}
+const SEPARATOR = <div role="none" className="w-px h-6 shrink-0 bg-bg-emphasis" />;
 
-const ROW =
-  "flex w-full items-center gap-2 h-8 px-2 rounded text-sm text-text text-left cursor-pointer transition-colors hover:bg-bg-muted focus-visible:outline-2 focus-visible:outline-accent";
-const ROW_ICON = "w-4 h-4 stroke-[1.5] text-text-muted shrink-0";
-
-function IconButton({
-  label,
-  active = false,
-  onClick,
-  children,
-}: {
-  label: string;
-  active?: boolean;
-  onClick: () => void;
-  children: ReactNode;
-}) {
+function Tip({ label, children }: { label: string; children: ReactNode }) {
   return (
-    <Tooltip content={label}>
-      <button
-        type="button"
-        aria-label={label}
-        aria-pressed={active}
-        onClick={onClick}
-        className={cn(
-          "h-7 w-7 flex items-center justify-center rounded transition-colors cursor-pointer focus-visible:outline-2 focus-visible:outline-accent",
-          active
-            ? "bg-bg-muted text-text"
-            : "text-text-muted hover:bg-bg-muted hover:text-text",
-        )}
+    <TooltipRoot delayDuration={300}>
+      <TooltipTrigger asChild>{children}</TooltipTrigger>
+      <TooltipContent
+        side="top"
+        sideOffset={6}
+        className="mx-0 rounded-lg px-2 py-1.5 text-2xs leading-[18px] font-medium bg-text text-bg backdrop-blur-none shadow-[0_4px_6px_-1px_rgba(0,0,0,0.1)]"
       >
-        {children}
-      </button>
-    </Tooltip>
+        {label}
+      </TooltipContent>
+    </TooltipRoot>
   );
 }
+
+type OpenMenu = "improve" | "blocks" | "more" | null;
 
 interface SelectionMenuProps {
   editor: TiptapEditor;
-  /** The AI popover is open: the menu hides. */
+  /** The AI menu is open: the toolbar hides. */
   aiOpen: boolean;
   onAddLink: () => void;
+  /** Opens the AI menu with its prompt input. */
+  onAskAi: () => void;
   onRunAi: (run: AiRun) => void;
 }
 
 /**
- * Menu on a text selection: block type, marks, AI skills and an "Edit with
- * AI" input. The buttons keep the editor focus and selection.
+ * Floating toolbar on a text selection: AI ("Improve"), block type, marks,
+ * link and more. The buttons keep the editor selection; the dropdowns show
+ * it as a highlight while they have the focus. The dropdowns render in the
+ * toolbar element, so that the bubble menu plugin sees the focus in them.
  */
 export function SelectionMenu({
   editor,
   aiOpen,
   onAddLink,
+  onAskAi,
   onRunAi,
 }: SelectionMenuProps) {
   const [dragging, setDragging] = useState(false);
   const [dismissed, setDismissed] = useState(false);
-  const [view, setView] = useState<"main" | "blocks">("main");
-  const [prompt, setPrompt] = useState("");
+  const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
+  const [focusIndex, setFocusIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
-  const panelRef = useRef<HTMLDivElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  // Focus the first item of the next view (keyboard use).
-  const focusViewRef = useRef(false);
-  // The AI popover takes the highlight: the input blur must not clear it.
+  const toolbarRef = useRef<HTMLDivElement>(null);
+  // The AI menu takes the highlight: closing a dropdown must not clear it.
   const runningRef = useRef(false);
+  // The dropdown was opened from the keyboard: give the focus back to its button.
+  const keyboardOpenRef = useRef(false);
+  // The toolbar shows the selection as a highlight while a dropdown is open.
+  const highlightRef = useRef(false);
 
   const visible = !dragging && !dismissed && !aiOpen;
 
   const active = useEditorState({
     editor,
-    selector: ({ editor }) => ({
-      blockType: currentBlockType(editor),
-      marks: MARKS.map((mark) => editor.isActive(mark.name)),
-      link: editor.isActive("link"),
-    }),
+    selector: ({ editor }) => {
+      const item = listItemType(editor);
+      return {
+        blockType: currentBlockType(editor),
+        marks: MARKS.map((mark) => editor.isActive(mark.name)),
+        link: editor.isActive("link"),
+        canLift: editor.can().liftListItem(item),
+        canSink: editor.can().sinkListItem(item),
+      };
+    },
   });
 
   const shouldShow = useCallback(
@@ -347,34 +277,20 @@ export function SelectionMenu({
       state: EditorState;
       element: HTMLElement;
     }) =>
-      (view.hasFocus() || element.contains(document.activeElement)) &&
+      (view.hasFocus() ||
+        element.contains(document.activeElement) ||
+        isInMenuLayer(document.activeElement)) &&
       hasEditableTextSelection(editor, state),
     [],
   );
 
   const options = useMemo(
     () => ({
-      placement: "bottom-start" as const,
-      offset: 8,
-      flip: { fallbackPlacements: ["top-start" as const] },
+      placement: "top" as const,
+      offset: 4,
+      flip: { fallbackPlacements: ["bottom" as const] },
       shift: { padding: 8 },
-      size: {
-        padding: 8,
-        apply: ({
-          availableHeight,
-          elements,
-        }: {
-          availableHeight: number;
-          elements: { floating: HTMLElement };
-        }) => {
-          // The panel is not a direct child: pass the height as a variable.
-          elements.floating.style.setProperty(
-            "--selection-menu-max-height",
-            `${Math.max(availableHeight, 160)}px`,
-          );
-        },
-      },
-      // The plugin element only positions the panel: keep it out of the tab
+      // The plugin element only positions the toolbar: keep it out of the tab
       // order (the plugin sets tabIndex 0) and above the editor content.
       onShow: () => {
         const element = menuRef.current;
@@ -386,25 +302,28 @@ export function SelectionMenu({
     [],
   );
 
-  const updatePosition = useCallback(() => {
-    if (editor.isDestroyed) return;
-    editor.view.dispatch(
-      editor.state.tr.setMeta("bubbleMenu", "updatePosition"),
-    );
-  }, [editor]);
+  // The plugin places the element before React renders the toolbar into it:
+  // place it again with its size.
+  useLayoutEffect(() => {
+    if (!visible || editor.isDestroyed) return;
+    editor.view.dispatch(editor.state.tr.setMeta("bubbleMenu", "updatePosition"));
+  }, [visible, editor]);
 
-  // A new selection shows the menu again, with the main view.
+  // A new selection shows the toolbar again.
   useEffect(() => {
-    const reset = () => {
-      setDismissed(false);
-      setView("main");
-      setPrompt("");
-    };
+    const reset = () => setDismissed(false);
     editor.on("selectionUpdate", reset);
     return () => {
       editor.off("selectionUpdate", reset);
     };
   }, [editor]);
+
+  // The AI menu closed without a change (Discard, Stop): show the toolbar again.
+  useEffect(() => {
+    if (aiOpen) return;
+    runningRef.current = false;
+    setDismissed(false);
+  }, [aiOpen]);
 
   // Hide while the mouse selects; show on mouse-up.
   useEffect(() => {
@@ -423,10 +342,12 @@ export function SelectionMenu({
   // Hide when the focus goes to another part of the app.
   useEffect(() => {
     const onBlur = ({ event }: { event: FocusEvent }) => {
-      // Switching to another app keeps the menu.
+      // Switching to another app keeps the toolbar.
       if (!document.hasFocus()) return;
       const target = event.relatedTarget as Node | null;
-      if (!menuRef.current?.contains(target)) setDismissed(true);
+      if (!menuRef.current?.contains(target) && !isInMenuLayer(target)) {
+        setDismissed(true);
+      }
     };
     editor.on("blur", onBlur);
     return () => {
@@ -434,95 +355,168 @@ export function SelectionMenu({
     };
   }, [editor]);
 
-  // The size changes (block list, new content): place the menu again.
-  useLayoutEffect(() => {
-    if (visible) updatePosition();
-  }, [visible, view, updatePosition]);
-
-  useLayoutEffect(() => {
-    if (!focusViewRef.current) return;
-    focusViewRef.current = false;
-    panelRef.current?.querySelector<HTMLButtonElement>("button")?.focus();
-  }, [view]);
-
-  const changeView = useCallback((next: "main" | "blocks") => {
-    focusViewRef.current = !!panelRef.current?.contains(document.activeElement);
-    setView(next);
-  }, []);
-
   const close = useCallback(() => {
     setDismissed(true);
     if (!editor.view.hasFocus()) editor.commands.focus();
   }, [editor]);
 
-  // Esc closes the block list, then the menu.
+  // Esc closes the toolbar (a dropdown closes itself first). Alt+F10 moves
+  // the focus from the editor into the toolbar.
   useEffect(() => {
-    if (!visible) return;
+    if (!visible || openMenu) return;
     const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "F10" && e.altKey && editor.view.hasFocus()) {
+        e.preventDefault();
+        toolbarRef.current
+          ?.querySelector<HTMLButtonElement>("[data-toolbar-item][tabindex='0']")
+          ?.focus();
+        return;
+      }
       if (e.key !== "Escape") return;
-      const inMenu = !!panelRef.current?.contains(document.activeElement);
+      const inMenu = !!toolbarRef.current?.contains(document.activeElement);
       if (!inMenu && !editor.view.hasFocus()) return;
       e.preventDefault();
       e.stopPropagation();
-      if (view === "blocks") changeView("main");
-      else close();
+      close();
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [visible, view, editor, changeView, close]);
+  }, [visible, openMenu, editor, close]);
+
+  // The focus leaves the editor for a dropdown: keep the selection visible
+  // until the editor has the focus again. WebKit keeps the DOM selection only
+  // when the editor takes the focus before the highlight goes away.
+  useEffect(() => {
+    const onFocus = () => {
+      if (!highlightRef.current) return;
+      highlightRef.current = false;
+      setAiHighlight(editor, null);
+    };
+    editor.on("focus", onFocus);
+    return () => {
+      editor.off("focus", onFocus);
+    };
+  }, [editor]);
+
+  const changeMenu = useCallback(
+    (menu: Exclude<OpenMenu, null>, open: boolean) => {
+      setOpenMenu(open ? menu : null);
+      if (open) {
+        const { from, to } = editor.state.selection;
+        highlightRef.current = true;
+        setAiHighlight(editor, { from, to });
+      } else if (runningRef.current) {
+        // The AI menu owns the highlight now.
+        highlightRef.current = false;
+      } else if (!keyboardOpenRef.current) {
+        editor.view.focus();
+      }
+    },
+    [editor],
+  );
+
+  const onCloseAutoFocus = useCallback(
+    (e: Event) => {
+      // From the keyboard, the focus goes back to the dropdown button.
+      if (keyboardOpenRef.current) {
+        keyboardOpenRef.current = false;
+        return;
+      }
+      e.preventDefault();
+      if (!runningRef.current) editor.view.focus();
+    },
+    [editor],
+  );
 
   const run = useCallback(
     (aiRun: AiRun) => {
       runningRef.current = true;
+      keyboardOpenRef.current = false;
       setDismissed(true);
       onRunAi(aiRun);
     },
     [onRunAi],
   );
 
-  const chooseSkill = useCallback(
-    (skill: Skill) => {
-      if (skill.run) {
-        run(skill.run);
-        return;
-      }
-      setPrompt(TRANSLATE_PREFIX);
-      requestAnimationFrame(() => {
-        const input = inputRef.current;
-        input?.focus();
-        input?.setSelectionRange(TRANSLATE_PREFIX.length, TRANSLATE_PREFIX.length);
-      });
-    },
-    [run],
-  );
+  const askAi = useCallback(() => {
+    runningRef.current = true;
+    keyboardOpenRef.current = false;
+    setDismissed(true);
+    onAskAi();
+  }, [onAskAi]);
 
   const setBlockType = useCallback(
-    (type: BlockType) => {
-      if (type !== currentBlockType(editor)) {
+    (label: string) => {
+      const type = BLOCK_TYPES.find((t) => t.label === label);
+      if (type && type !== currentBlockType(editor)) {
         type.apply(editor.chain().focus().clearNodes()).run();
       }
-      changeView("main");
     },
-    [editor, changeView],
+    [editor],
   );
 
-  const handleInputKeyDown = (e: ReactKeyboardEvent<HTMLInputElement>) => {
-    if (e.key === "Enter" && !e.nativeEvent.isComposing) {
-      e.preventDefault();
-      const instruction = prompt.trim();
-      if (instruction && instruction !== TRANSLATE_PREFIX.trim()) {
-        run({ instruction });
+  // Roving focus: the toolbar is one tab stop; arrow keys move in it.
+  const handleToolbarKeyDown = (e: ReactKeyboardEvent<HTMLDivElement>) => {
+    const items = Array.from(
+      toolbarRef.current?.querySelectorAll<HTMLButtonElement>(
+        "[data-toolbar-item]",
+      ) ?? [],
+    );
+    const index = items.indexOf(document.activeElement as HTMLButtonElement);
+    if (index < 0) return;
+    const next =
+      e.key === "ArrowRight"
+        ? (index + 1) % items.length
+        : e.key === "ArrowLeft"
+          ? (index - 1 + items.length) % items.length
+          : e.key === "Home"
+            ? 0
+            : e.key === "End"
+              ? items.length - 1
+              : -1;
+    if (next < 0) {
+      if (["Enter", " ", "ArrowDown"].includes(e.key)) {
+        keyboardOpenRef.current = true;
       }
-    } else if (e.key === "ArrowUp") {
-      e.preventDefault();
-      const skills = panelRef.current?.querySelectorAll<HTMLButtonElement>(
-        "[data-skill]",
-      );
-      skills?.[skills.length - 1]?.focus();
+      return;
     }
+    e.preventDefault();
+    items[next]?.focus();
   };
 
-  const BlockIcon = active.blockType.icon;
+  let itemIndex = 0;
+  /** Props of one toolbar item for the roving focus. */
+  const item = () => {
+    const index = itemIndex++;
+    return {
+      "data-toolbar-item": "",
+      tabIndex: index === focusIndex ? 0 : -1,
+      onFocus: () => setFocusIndex(index),
+    };
+  };
+
+  const renderSkill = (skill: AiSkill) =>
+    skill.items ? (
+      <DropdownMenu.Sub key={skill.label}>
+        <MenuSubTrigger icon={skill.icon} label={skill.label} />
+        <MenuSubContent container={menuRef.current}>
+          {skill.items.map((sub) => (
+            <MenuItem
+              key={sub.label}
+              label={sub.label}
+              onSelect={() => sub.run && run(sub.run)}
+            />
+          ))}
+        </MenuSubContent>
+      </DropdownMenu.Sub>
+    ) : (
+      <MenuItem
+        key={skill.label}
+        icon={skill.icon}
+        label={skill.label}
+        onSelect={() => skill.run && run(skill.run)}
+      />
+    );
 
   return (
     <BubbleMenu
@@ -533,159 +527,224 @@ export function SelectionMenu({
     >
       {visible && (
         <div
-          ref={panelRef}
-          role="dialog"
+          ref={toolbarRef}
+          role="toolbar"
           aria-label="Selection menu"
-          // Keep the editor focus and selection; only the input takes focus.
-          onMouseDown={(e) => {
-            if (e.target !== inputRef.current) e.preventDefault();
-          }}
-          className="w-60 max-h-(--selection-menu-max-height) overflow-y-auto overscroll-contain bg-bg border border-border rounded-lg shadow-md p-1"
+          onKeyDown={handleToolbarKeyDown}
+          // Keep the editor focus and selection.
+          onMouseDown={(e) => e.preventDefault()}
+          className={cn(
+            TOOLBAR_BOX,
+            "animate-toolbar-in motion-reduce:animate-none",
+          )}
         >
-          {view === "blocks" ? (
-            <>
+          <DropdownMenu.Root
+            modal={false}
+            open={openMenu === "improve"}
+            onOpenChange={(open) => changeMenu("improve", open)}
+          >
+            <DropdownMenu.Trigger asChild>
               <button
                 type="button"
-                onClick={() => changeView("main")}
-                className={cn(ROW, "text-text-muted")}
+                aria-label="Improve"
+                className={cn(MENU_BUTTON, "gap-1")}
+                {...item()}
               >
-                <ArrowLeftIcon className={ROW_ICON} />
-                Turn into
+                <SparklesIcon
+                  className={cn(
+                    MENU_ICON,
+                    openMenu === "improve" && "text-ai",
+                  )}
+                />
+                <span className={MENU_BUTTON_TEXT}>Improve</span>
               </button>
-              <div
-                role="menu"
-                aria-label="Turn into"
-                onKeyDown={moveFocus}
-                className="flex flex-col"
-              >
-                {BLOCK_TYPES.map((type) => {
-                  const checked = type === active.blockType;
-                  return (
-                    <button
-                      key={type.label}
-                      type="button"
-                      role="menuitemradio"
-                      aria-checked={checked}
-                      onClick={() => setBlockType(type)}
-                      className={ROW}
-                    >
-                      <type.icon className={ROW_ICON} />
-                      <span className="flex-1">{type.label}</span>
-                      {checked && (
-                        <CheckIcon className="w-4 h-4 stroke-[1.5] text-text" />
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </>
-          ) : (
-            <>
+            </DropdownMenu.Trigger>
+            <MenuContent
+              container={menuRef.current}
+              align="start"
+              aria-label="Improve"
+              onCloseAutoFocus={onCloseAutoFocus}
+              className="w-max"
+            >
+              {IMPROVE_GROUPS.map((group, index) => (
+                <Fragment key={index}>
+                  {index > 0 && <MenuSeparator />}
+                  <DropdownMenu.Group className="flex flex-col">
+                    {group.map((skill) =>
+                      skill ? (
+                        renderSkill(skill)
+                      ) : (
+                        <MenuItem
+                          key="ask"
+                          icon={SparklesIcon}
+                          label="Ask AI"
+                          onSelect={askAi}
+                        />
+                      ),
+                    )}
+                  </DropdownMenu.Group>
+                </Fragment>
+              ))}
+            </MenuContent>
+          </DropdownMenu.Root>
+
+          {SEPARATOR}
+
+          <DropdownMenu.Root
+            modal={false}
+            open={openMenu === "blocks"}
+            onOpenChange={(open) => changeMenu("blocks", open)}
+          >
+            <DropdownMenu.Trigger asChild>
               <button
                 type="button"
-                aria-haspopup="menu"
-                onClick={() => changeView("blocks")}
-                onKeyDown={(e) => {
-                  if (e.key === "ArrowRight") {
-                    e.preventDefault();
-                    changeView("blocks");
-                  }
-                }}
-                className={ROW}
+                aria-label={`Turn into (current: ${active.blockType.label})`}
+                className={cn(MENU_BUTTON, "gap-1")}
+                {...item()}
               >
-                <BlockIcon className={ROW_ICON} />
-                <span className="flex-1">
-                  <span className="sr-only">Turn into, current type: </span>
+                <span className={MENU_BUTTON_TEXT}>
                   {active.blockType.label}
                 </span>
-                <ChevronRightIcon className="w-4 h-4 stroke-[1.5] text-text-muted" />
+                <ChevronDownIcon className="w-2.5 h-2.5 shrink-0 stroke-[3]" />
               </button>
-
-              <div
-                role="group"
-                aria-label="Format"
-                className="flex items-center gap-0.5 px-1 py-0.5"
-              >
-                {MARKS.map((mark, index) => (
-                  <IconButton
-                    key={mark.name}
-                    label={`${mark.label} (${mark.shortcut})`}
-                    active={active.marks[index]}
-                    onClick={() => mark.toggle(editor.chain().focus()).run()}
-                  >
-                    <mark.icon className="w-4 h-4 stroke-[1.5]" />
-                  </IconButton>
-                ))}
-                <IconButton
-                  label={`Link (${mod}${sep}K)`}
-                  active={active.link}
-                  onClick={onAddLink}
-                >
-                  <LinkIcon className="w-4 h-4 stroke-[1.5]" />
-                </IconButton>
-                <IconButton
-                  label="Clear formatting"
-                  onClick={() => editor.chain().focus().unsetAllMarks().run()}
-                >
-                  <RemoveFormattingIcon className="w-4 h-4 stroke-[1.5]" />
-                </IconButton>
-              </div>
-
-              <div className="border-t border-border my-1" />
-
-              <p
-                id="selection-menu-skills"
-                className="px-2 pt-1 pb-0.5 text-xs font-medium text-text-muted"
-              >
-                Skills
-              </p>
-              <div
-                role="group"
-                aria-labelledby="selection-menu-skills"
-                onKeyDown={moveFocus}
+            </DropdownMenu.Trigger>
+            <MenuContent
+              container={menuRef.current}
+              align="start"
+              aria-label="Turn into"
+              onCloseAutoFocus={onCloseAutoFocus}
+              className="w-max min-w-36"
+            >
+              <MenuLabel>Turn into</MenuLabel>
+              <DropdownMenu.RadioGroup
+                value={active.blockType.label}
+                onValueChange={setBlockType}
                 className="flex flex-col"
               >
-                {SKILLS.map((skill) => (
-                  <button
-                    key={skill.label}
-                    type="button"
-                    data-skill
-                    onClick={() => chooseSkill(skill)}
-                    className={ROW}
-                  >
-                    <skill.icon className={ROW_ICON} />
-                    {skill.label}
-                  </button>
+                {BLOCK_TYPES.map((type) => (
+                  <MenuRadioItem
+                    key={type.label}
+                    value={type.label}
+                    icon={type.icon}
+                    label={type.label}
+                  />
                 ))}
-              </div>
+              </DropdownMenu.RadioGroup>
+            </MenuContent>
+          </DropdownMenu.Root>
 
-              <div className="mt-1 flex items-center gap-2 h-8 px-2 rounded border border-border focus-within:border-accent">
-                <label htmlFor="selection-menu-input" className="text-text-muted">
-                  <SparklesIcon className="w-4 h-4 stroke-[1.5]" />
-                  <span className="sr-only">Edit with AI</span>
-                </label>
-                <input
-                  id="selection-menu-input"
-                  ref={inputRef}
-                  value={prompt}
-                  onChange={(e) => setPrompt(e.target.value)}
-                  onKeyDown={handleInputKeyDown}
-                  onFocus={() => {
-                    runningRef.current = false;
-                    const { from, to } = editor.state.selection;
-                    setAiHighlight(editor, { from, to });
-                  }}
-                  onBlur={() => {
-                    if (!runningRef.current) setAiHighlight(editor, null);
-                  }}
-                  placeholder="Edit with AI…"
-                  autoComplete="off"
-                  spellCheck={false}
-                  className="flex-1 min-w-0 bg-transparent text-sm text-text placeholder:text-text-muted outline-none"
-                />
-              </div>
-            </>
-          )}
+          {SEPARATOR}
+
+          <div role="group" aria-label="Format" className="flex gap-0.5">
+            {MARKS.map((mark, index) => (
+              <Tip key={mark.name} label={`${mark.label} ${mark.shortcut}`}>
+                <button
+                  type="button"
+                  aria-label={mark.label}
+                  aria-keyshortcuts={mark.shortcut}
+                  aria-pressed={active.marks[index]}
+                  onClick={() => mark.toggle(editor.chain().focus()).run()}
+                  className={MENU_BUTTON}
+                  {...item()}
+                >
+                  <mark.icon className={MENU_ICON} />
+                </button>
+              </Tip>
+            ))}
+          </div>
+
+          {SEPARATOR}
+
+          <Tip label={`Link ${mod}${sep}K`}>
+            <button
+              type="button"
+              aria-label="Link"
+              aria-pressed={active.link}
+              onClick={onAddLink}
+              className={MENU_BUTTON}
+              {...item()}
+            >
+              <LinkIcon className={MENU_ICON} />
+            </button>
+          </Tip>
+
+          {SEPARATOR}
+
+          <DropdownMenu.Root
+            modal={false}
+            open={openMenu === "more"}
+            onOpenChange={(open) => changeMenu("more", open)}
+          >
+            <Tip label="More options">
+              <DropdownMenu.Trigger asChild>
+                <button
+                  type="button"
+                  aria-label="More options"
+                  className={MENU_BUTTON}
+                  {...item()}
+                >
+                  <MoreVerticalIcon
+                    className={cn(MENU_ICON, openMenu === "more" && "text-ai")}
+                  />
+                </button>
+              </DropdownMenu.Trigger>
+            </Tip>
+            <MenuContent
+              container={menuRef.current}
+              side="top"
+              align="end"
+              aria-label="More options"
+              onCloseAutoFocus={onCloseAutoFocus}
+              className={cn(TOOLBAR_BOX, "flex-row p-[3px] rounded-[15px]")}
+            >
+              {(
+                [
+                  {
+                    label: "Decrease indent",
+                    icon: IndentDecreaseIcon,
+                    disabled: !active.canLift,
+                    action: () =>
+                      editor.chain().liftListItem(listItemType(editor)).run(),
+                  },
+                  {
+                    label: "Increase indent",
+                    icon: IndentIncreaseIcon,
+                    disabled: !active.canSink,
+                    action: () =>
+                      editor.chain().sinkListItem(listItemType(editor)).run(),
+                  },
+                  null,
+                  {
+                    label: "Clear formatting",
+                    icon: RemoveFormattingIcon,
+                    disabled: false,
+                    action: () => editor.chain().unsetAllMarks().run(),
+                  },
+                ] as const
+              ).map((entry) =>
+                entry ? (
+                  <DropdownMenu.Item
+                    key={entry.label}
+                    aria-label={entry.label}
+                    disabled={entry.disabled}
+                    // Keep the menu open, like a toolbar.
+                    onSelect={(e) => {
+                      e.preventDefault();
+                      entry.action();
+                    }}
+                    className={cn(
+                      MENU_BUTTON,
+                      "data-highlighted:bg-menu-hover data-highlighted:text-text data-disabled:text-text/40 data-disabled:bg-transparent data-disabled:cursor-default",
+                    )}
+                  >
+                    <entry.icon className={MENU_ICON} />
+                  </DropdownMenu.Item>
+                ) : (
+                  <Fragment key="sep">{SEPARATOR}</Fragment>
+                ),
+              )}
+            </MenuContent>
+          </DropdownMenu.Root>
         </div>
       )}
     </BubbleMenu>

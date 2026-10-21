@@ -2719,6 +2719,7 @@ export function Editor({
                     editor={editor}
                     aiOpen={aiPopoverOpen}
                     onAddLink={handleAddLink}
+                    onAskAi={openAiPopover}
                     onRunAi={runAi}
                   />
                 )}
