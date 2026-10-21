@@ -79,6 +79,7 @@ import type { Settings } from "../../types/note";
 import {
   BoldIcon,
   ItalicIcon,
+  SparklesIcon,
   StrikethroughIcon,
   Heading1Icon,
   Heading2Icon,
@@ -247,6 +248,7 @@ interface FormatBarProps {
   onAddLink: () => void;
   onAddBlockMath: () => void;
   onAddImage: () => void;
+  onAskAi: () => void;
 }
 
 // FormatBar must re-render with parent to reflect editor.isActive() state changes
@@ -256,6 +258,7 @@ function FormatBar({
   onAddLink,
   onAddBlockMath,
   onAddImage,
+  onAskAi,
 }: FormatBarProps) {
   const [tableMenuOpen, setTableMenuOpen] = useState(false);
 
@@ -263,6 +266,17 @@ function FormatBar({
 
   return (
     <div className="flex items-center gap-1 px-3 pb-2 border-b border-border overflow-x-auto scrollbar-none">
+      <ToolbarButton
+        onClick={onAskAi}
+        title={`Ask AI (${mod}${isMac ? "" : "+"}J)`}
+        className="w-auto gap-1.5 px-2"
+      >
+        <SparklesIcon className="w-4 h-4 stroke-[1.5]" />
+        Ask AI
+      </ToolbarButton>
+
+      <div className="w-px h-4.5 border-l border-border mx-2" />
+
       <ToolbarButton
         onClick={() => editor.chain().focus().toggleBold().run()}
         isActive={editor.isActive("bold")}
@@ -1276,7 +1290,7 @@ export function Editor({
   // Track reloadVersion to detect manual refreshes
   const lastReloadVersionRef = useRef(0);
 
-  useAiAssist(editor);
+  const openAiPopover = useAiAssist(editor);
 
   // Notify parent component when editor is ready
   useEffect(() => {
@@ -2445,6 +2459,7 @@ export function Editor({
           onAddLink={handleAddLink}
           onAddBlockMath={handleAddBlockMath}
           onAddImage={handleAddImage}
+          onAskAi={openAiPopover}
         />
       </div>
 

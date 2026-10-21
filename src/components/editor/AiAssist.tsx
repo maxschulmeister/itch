@@ -175,6 +175,7 @@ const isAiShortcut = (e: KeyboardEvent) =>
 /**
  * Inline AI for the editor: the "Ask AI" bubble on a selection, Mod+J, the
  * "/Ask AI" slash command, and the popover that streams the pi response.
+ * Returns the function that opens the popover (for the format bar button).
  */
 export function useAiAssist(editor: TiptapEditor | null) {
   const popupRef = useRef<TippyInstance | null>(null);
@@ -280,13 +281,11 @@ export function useAiAssist(editor: TiptapEditor | null) {
   // "Ask AI" bubble on a text selection
   useEffect(() => {
     if (!editor) return;
-    const component = new ReactRenderer(AiBubbleButton, {
-      props: { onClick: openPopover },
-      editor,
-    });
+    // Created on the first show: a ReactRenderer made before the editor view
+    // is mounted never renders its component.
+    let component: ReactRenderer | null = null;
     const bubble = tippy(document.body, {
       appendTo: () => document.body,
-      content: component.element,
       interactive: true,
       trigger: "manual",
       hideOnClick: false,
@@ -311,6 +310,13 @@ export function useAiAssist(editor: TiptapEditor | null) {
       if (!visible) {
         bubble.hide();
         return;
+      }
+      if (!component) {
+        component = new ReactRenderer(AiBubbleButton, {
+          props: { onClick: openPopover },
+          editor,
+        });
+        bubble.setContent(component.element);
       }
       const { from, to } = selection;
       bubble.setProps({
@@ -350,7 +356,9 @@ export function useAiAssist(editor: TiptapEditor | null) {
       document.removeEventListener("scroll", onScroll, true);
       bubbleRef.current = null;
       bubble.destroy();
-      component.destroy();
+      component?.destroy();
     };
   }, [editor, openPopover]);
+
+  return openPopover;
 }
