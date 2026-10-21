@@ -1,7 +1,7 @@
 import { useState, useEffect, useReducer, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
-import { Button, Input } from "../ui";
+import { Button, Input, Select } from "../ui";
 import {
   SpinnerIcon,
   CheckIcon,
@@ -95,11 +95,23 @@ const AI_PROVIDER_INFO: Record<
   },
 };
 
-type PiSettingKey = "piModel" | "piPath";
+type PiSettingKey = "piModel" | "piThinking" | "piPath";
+
+const PI_THINKING_OPTIONS = [
+  { value: "", label: "Default" },
+  { value: "off", label: "Off" },
+  { value: "minimal", label: "Minimal" },
+  { value: "low", label: "Low" },
+  { value: "medium", label: "Medium" },
+  { value: "high", label: "High" },
+  { value: "xhigh", label: "Extra high" },
+  { value: "max", label: "Max" },
+];
 
 function PiSettings() {
   const [values, setValues] = useState<Record<PiSettingKey, string>>({
     piModel: "",
+    piThinking: "",
     piPath: "",
   });
   const [saved, setSaved] = useState(values);
@@ -109,6 +121,7 @@ function PiSettings() {
       .then((settings) => {
         const loaded = {
           piModel: settings.piModel ?? "",
+          piThinking: settings.piThinking ?? "",
           piPath: settings.piPath ?? "",
         };
         setValues(loaded);
@@ -118,8 +131,8 @@ function PiSettings() {
   }, []);
 
   const save = useCallback(
-    async (key: PiSettingKey) => {
-      const value = values[key].trim();
+    async (key: PiSettingKey, rawValue = values[key]) => {
+      const value = rawValue.trim();
       if (value === saved[key]) return;
       try {
         const settings = await invoke<Settings>("get_settings");
@@ -155,6 +168,27 @@ function PiSettings() {
         />
       </div>
       <div className="flex items-center justify-between gap-4">
+        <label htmlFor="pi-thinking" className="text-sm text-text font-medium">
+          Thinking
+        </label>
+        <Select
+          id="pi-thinking"
+          value={values.piThinking}
+          onChange={(e) => {
+            const value = e.target.value;
+            setValues((v) => ({ ...v, piThinking: value }));
+            save("piThinking", value);
+          }}
+          className="w-64"
+        >
+          {PI_THINKING_OPTIONS.map((opt) => (
+            <option key={opt.value} value={opt.value}>
+              {opt.label}
+            </option>
+          ))}
+        </Select>
+      </div>
+      <div className="flex items-center justify-between gap-4">
         <label htmlFor="pi-path" className="text-sm text-text font-medium">
           pi path
         </label>
@@ -171,7 +205,8 @@ function PiSettings() {
         />
       </div>
       <p className="text-xs text-text-muted">
-        Leave the model empty to use the default model of pi. Leave the path
+        Leave the model empty to use the default model of pi. Default thinking
+        uses the level of pi. Lower levels give faster answers. Leave the path
         empty to find pi on your PATH.
       </p>
     </div>

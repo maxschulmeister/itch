@@ -142,6 +142,9 @@ pub struct Settings {
     /// Model for the inline AI popover (`pi --model`); `None` uses pi's default.
     #[serde(rename = "piModel")]
     pub pi_model: Option<String>,
+    /// Thinking level for the inline AI popover (`pi --thinking`); `None` uses pi's default.
+    #[serde(rename = "piThinking")]
+    pub pi_thinking: Option<String>,
     /// Path to the pi executable; `None` searches the PATH.
     #[serde(rename = "piPath")]
     pub pi_path: Option<String>,

@@ -137,7 +137,7 @@ impl RunTracker {
     }
 }
 
-pub fn build_args(model: Option<&str>) -> Vec<String> {
+pub fn build_args(model: Option<&str>, thinking: Option<&str>) -> Vec<String> {
     let mut args: Vec<String> = [
         "--mode",
         "rpc",
@@ -160,6 +160,10 @@ pub fn build_args(model: Option<&str>) -> Vec<String> {
     if let Some(model) = model.map(str::trim).filter(|m| !m.is_empty()) {
         args.push("--model".to_string());
         args.push(model.to_string());
+    }
+    if let Some(thinking) = thinking.map(str::trim).filter(|t| !t.is_empty()) {
+        args.push("--thinking".to_string());
+        args.push(thinking.to_string());
     }
     args
 }
@@ -449,9 +453,13 @@ pub async fn pi_prompt(
     request: PromptRequest,
     on_event: Channel<PiEvent>,
 ) -> Result<(), String> {
-    let (model, path_override) = {
+    let (model, thinking, path_override) = {
         let settings = app_state.settings.read().expect("settings read lock");
-        (settings.pi_model.clone(), settings.pi_path.clone())
+        (
+            settings.pi_model.clone(),
+            settings.pi_thinking.clone(),
+            settings.pi_path.clone(),
+        )
     };
     let app = window.app_handle().clone();
     let label = window.label().to_string();
@@ -465,7 +473,7 @@ pub async fn pi_prompt(
             map.remove(&session_id);
             let path = search_path();
             let program = resolve_program(path_override.as_deref(), &path)?;
-            let process = PiProcess::spawn(&program, &build_args(model.as_deref()), &path)?;
+            let process = PiProcess::spawn(&program, &build_args(model.as_deref(), thinking.as_deref()), &path)?;
             map.insert(
                 session_id.clone(),
                 Session {
@@ -705,7 +713,7 @@ mod tests {
 
     #[test]
     fn args_use_minimal_fixed_setup() {
-        let args = build_args(None);
+        let args = build_args(None, None);
         for flag in [
             "--no-session",
             "--no-tools",
@@ -728,10 +736,19 @@ mod tests {
 
     #[test]
     fn args_add_model_only_when_set() {
-        assert!(!build_args(Some("  ")).iter().any(|a| a == "--model"));
-        let args = build_args(Some(" anthropic/claude-sonnet-4-5 "));
+        assert!(!build_args(Some("  "), None).iter().any(|a| a == "--model"));
+        let args = build_args(Some(" anthropic/claude-sonnet-4-5 "), None);
         let index = args.iter().position(|a| a == "--model").unwrap();
         assert_eq!(args[index + 1], "anthropic/claude-sonnet-4-5");
+    }
+
+    #[test]
+    fn args_add_thinking_only_when_set() {
+        assert!(!build_args(None, None).iter().any(|a| a == "--thinking"));
+        assert!(!build_args(None, Some(" ")).iter().any(|a| a == "--thinking"));
+        let args = build_args(None, Some("low"));
+        let index = args.iter().position(|a| a == "--thinking").unwrap();
+        assert_eq!(args[index + 1], "low");
     }
 
     #[test]
@@ -920,7 +937,7 @@ sleep 30"#,
     fn real_pi_streams_refines_and_aborts() {
         let path = search_path();
         let program = resolve_program(None, &path).expect("pi on PATH");
-        let mut process = PiProcess::spawn(&program, &build_args(None), &path).unwrap();
+        let mut process = PiProcess::spawn(&program, &build_args(None, None), &path).unwrap();
 
         let (sink, rx) = channel_sink();
         let first = PromptRequest {

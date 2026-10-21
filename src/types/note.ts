@@ -58,6 +58,7 @@ export interface Settings {
   interfaceZoom?: number;
   ollamaModel?: string;
   piModel?: string;
+  piThinking?: string;
   piPath?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;

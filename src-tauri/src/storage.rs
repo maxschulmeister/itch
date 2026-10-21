@@ -222,6 +222,7 @@ mod tests {
             sidebar_width_px: Some(300),
             ollama_model: Some("qwen3:8b".to_string()),
             pi_model: Some("anthropic/claude-sonnet-4-5".to_string()),
+            pi_thinking: Some("low".to_string()),
             pi_path: None,
             folders_enabled: Some(true),
             ignored_patterns: Some(vec!["node_modules".to_string()]),
