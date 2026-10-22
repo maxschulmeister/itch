@@ -3,20 +3,16 @@ import {
   useCallback,
   useEffect,
   useLayoutEffect,
-  useMemo,
   useRef,
   useState,
   type KeyboardEvent,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   ArrowUpIcon,
   CheckIcon,
-  ChevronRightIcon,
   CircleStopIcon,
   CopyIcon,
-  MicVocalIcon,
   RotateCcwIcon,
   SparklesIcon,
   XIcon,
@@ -39,21 +35,13 @@ import {
 import type { Settings } from "../../types/note";
 import { cn } from "../../lib/utils";
 import type { AiRun } from "./AiAssist";
-import {
-  CURSOR_SKILL_GROUPS,
-  SELECTION_SKILL_GROUPS,
-  TONES,
-  toneInstruction,
-  type AiSkill,
-} from "./aiSkills";
+import { CURSOR_SKILLS, type AiSkill } from "./aiSkills";
 import {
   CARD_BOX,
   MENU_BUTTON,
   MENU_BUTTON_PRIMARY,
   MENU_BUTTON_TEXT,
   MENU_ICON,
-  MenuContent,
-  MenuRadioItem,
 } from "./menuParts";
 
 export type AiMenuMode = "selection" | "cursor";
@@ -98,15 +86,8 @@ const LIST_ITEM = cn(
   "text-sm font-medium text-menu-fg transition-[background-color,color] duration-200 ease-menu",
   "aria-selected:bg-menu-hover aria-selected:text-text",
 );
-const LIST_LABEL =
-  "mt-3 mx-2 mb-1 text-2xs leading-[15px] font-semibold text-text";
 
-interface ListGroup {
-  label: string;
-  skills: AiSkill[];
-}
-
-const optionId = (list: string, index: number) => `ai-menu-${list}-${index}`;
+const optionId = (index: number) => `ai-menu-option-${index}`;
 
 export const AiMenu = memo(function AiMenu({
   mode,
@@ -127,7 +108,6 @@ export const AiMenu = memo(function AiMenu({
   const [text, setText] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [lastRun, setLastRun] = useState<AiRun | null>(null);
-  const [tone, setTone] = useState("");
   const [thinking, setThinking] = useState("");
   const [model, setModel] = useState("");
   // The default model and thinking level are set (from the settings and pi).
@@ -139,8 +119,6 @@ export const AiMenu = memo(function AiMenu({
   const [expanded, setExpanded] = useState(!initialRun);
   const [inputFocused, setInputFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [subSkill, setSubSkill] = useState<AiSkill | null>(null);
-  const [subIndex, setSubIndex] = useState(0);
   const [listPlacement, setListPlacement] = useState({
     above: false,
     maxHeight: 400,
@@ -166,27 +144,17 @@ export const AiMenu = memo(function AiMenu({
     ? fitThinkingLevel(thinking, supportedLevels)
     : "";
 
-  // The suggestion list: the skills whose label contains the prompt.
-  const groups = useMemo<ListGroup[]>(() => {
-    const query = prompt.trim().toLowerCase();
-    const all = mode === "selection" ? SELECTION_SKILL_GROUPS : CURSOR_SKILL_GROUPS;
-    return all
-      .map((group) => ({
-        label: group.label,
-        skills: group.skills.filter(
+  // At the cursor, a short list of skills whose label contains the prompt.
+  // With a selection, the "Improve" dropdown has the skills.
+  const query = prompt.trim().toLowerCase();
+  const skills =
+    mode === "cursor"
+      ? CURSOR_SKILLS.filter(
           (skill) => !query || skill.label.toLowerCase().includes(query),
-        ),
-      }))
-      .filter((group) => group.skills.length > 0);
-  }, [prompt, mode]);
-  const flatSkills = useMemo(() => groups.flatMap((g) => g.skills), [groups]);
-  const listOpen =
-    expanded &&
-    inputFocused &&
-    !busy &&
-    flatSkills.length > 0;
-  const active = flatSkills[Math.min(activeIndex, flatSkills.length - 1)];
-  const subItems = listOpen && subSkill ? (subSkill.items ?? []) : null;
+        )
+      : [];
+  const listOpen = expanded && inputFocused && !busy && skills.length > 0;
+  const active = skills[Math.min(activeIndex, skills.length - 1)];
 
   // One pi process per AI menu: stop it when the menu closes.
   useEffect(() => {
@@ -286,7 +254,6 @@ export const AiMenu = memo(function AiMenu({
       setStatus("streaming");
       setPrompt("");
       setExpanded(false);
-      setSubSkill(null);
       setActiveIndex(0);
       // The input goes away while pi writes: keep the focus in the menu.
       rootRef.current?.focus();
@@ -332,31 +299,18 @@ export const AiMenu = memo(function AiMenu({
     run(initialRun);
   }, [defaultsSet, initialRun, run]);
 
-  const withTone = useCallback(
-    (aiRun: AiRun): AiRun =>
-      tone
-        ? { ...aiRun, instruction: `${aiRun.instruction} ${toneInstruction(tone)}` }
-        : aiRun,
-    [tone],
-  );
-
   const submit = useCallback(() => {
     const instruction = prompt.trim();
     if (!instruction || busy) return;
     // A follow-up keeps the kind of the conversation (edit or read).
-    run(withTone({ instruction, readOnly: lastRun?.readOnly }));
-  }, [prompt, busy, run, withTone, lastRun]);
+    run({ instruction, readOnly: lastRun?.readOnly });
+  }, [prompt, busy, run, lastRun]);
 
   const chooseSkill = useCallback(
     (skill: AiSkill) => {
-      if (skill.items) {
-        setSubSkill(skill);
-        setSubIndex(0);
-      } else if (skill.run) {
-        run(withTone(skill.run));
-      }
+      if (skill.run) run(skill.run);
     },
-    [run, withTone],
+    [run],
   );
 
   const stop = useCallback(() => {
@@ -381,8 +335,6 @@ export const AiMenu = memo(function AiMenu({
       // Keep keys away from the global app and editor shortcuts.
       e.stopPropagation();
       if (e.key !== "Escape" || e.defaultPrevented) return;
-      // Keys of the tone dropdown (a portal) also come here.
-      if (!rootRef.current?.contains(e.target as Node)) return;
       e.preventDefault();
       if (busy) stop();
       else onClose();
@@ -395,26 +347,10 @@ export const AiMenu = memo(function AiMenu({
     const moves: Record<string, number> = { ArrowDown: 1, ArrowUp: -1 };
     if (listOpen && e.key in moves) {
       e.preventDefault();
-      if (subItems) {
-        setSubIndex((i) => (i + moves[e.key] + subItems.length) % subItems.length);
-      } else {
-        setActiveIndex(
-          (i) => (i + moves[e.key] + flatSkills.length) % flatSkills.length,
-        );
-      }
-    } else if (listOpen && e.key === "ArrowRight" && !subItems && active?.items) {
-      e.preventDefault();
-      chooseSkill(active);
-    } else if (listOpen && e.key === "ArrowLeft" && subItems) {
-      e.preventDefault();
-      setSubSkill(null);
-    } else if (e.key === "Escape" && listOpen && subItems) {
-      e.preventDefault();
-      setSubSkill(null);
+      setActiveIndex((i) => (i + moves[e.key] + skills.length) % skills.length);
     } else if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
-      const item = subItems ? subItems[subIndex] : listOpen ? active : null;
-      if (item) chooseSkill(item);
+      if (listOpen && active) chooseSkill(active);
       else submit();
     }
   };
@@ -433,47 +369,10 @@ export const AiMenu = memo(function AiMenu({
         : "Tell AI what else needs to be changed..."
       : "Ask AI what you want...";
 
-  const renderOption = (
-    skill: AiSkill,
-    index: number,
-    list: "main" | "sub",
-  ) => {
-    const selected =
-      list === "sub" ? index === subIndex : !subItems && skill === active;
-    return (
-      <div
-        key={skill.label}
-        id={optionId(list, index)}
-        role="option"
-        aria-selected={selected}
-        aria-haspopup={skill.items ? "listbox" : undefined}
-        aria-expanded={skill.items ? subSkill === skill : undefined}
-        onMouseEnter={() => {
-          if (list === "sub") {
-            setSubIndex(index);
-            return;
-          }
-          setActiveIndex(flatSkills.indexOf(skill));
-          setSubSkill(skill.items ? skill : null);
-        }}
-        onClick={() => chooseSkill(skill)}
-        className={cn(LIST_ITEM, skill === subSkill && "bg-menu-hover text-text")}
-      >
-        {skill.icon && <skill.icon className={MENU_ICON} />}
-        <span className={cn(MENU_BUTTON_TEXT, "flex-1 truncate")}>
-          {skill.label}
-        </span>
-        {skill.items && <ChevronRightIcon className="w-3.5 h-3.5 shrink-0" />}
-      </div>
-    );
-  };
-
   const listStyle = {
     maxHeight: listPlacement.maxHeight,
   };
   const listPosition = listPlacement.above ? "bottom-full mb-1.5" : "top-full mt-1.5";
-
-  let optionIndex = 0;
 
   return (
     <div
@@ -571,7 +470,6 @@ export const AiMenu = memo(function AiMenu({
                 onChange={(e) => {
                   setPrompt(e.target.value);
                   setActiveIndex(0);
-                  setSubSkill(null);
                 }}
                 onKeyDown={handleInputKeyDown}
                 onFocus={() => {
@@ -579,16 +477,12 @@ export const AiMenu = memo(function AiMenu({
                   setExpanded(true);
                 }}
                 onBlur={() => setInputFocused(false)}
-                role="combobox"
-                aria-autocomplete="list"
-                aria-expanded={listOpen}
+                role={mode === "cursor" ? "combobox" : undefined}
+                aria-autocomplete={mode === "cursor" ? "list" : undefined}
+                aria-expanded={mode === "cursor" ? listOpen : undefined}
                 aria-controls={listOpen ? "ai-menu-list" : undefined}
                 aria-activedescendant={
-                  !listOpen
-                    ? undefined
-                    : subItems
-                      ? optionId("sub", subIndex)
-                      : optionId("main", flatSkills.indexOf(active))
+                  listOpen ? optionId(skills.indexOf(active)) : undefined
                 }
                 aria-describedby={error ? "ai-menu-error" : undefined}
                 placeholder={placeholder}
@@ -605,35 +499,6 @@ export const AiMenu = memo(function AiMenu({
             <div className="flex flex-wrap items-center gap-1">
               {expanded && (
                 <>
-                  <DropdownMenu.Root modal={false}>
-                    <DropdownMenu.Trigger asChild>
-                      <button
-                        type="button"
-                        aria-label="Tone adjustment options"
-                        aria-pressed={!!tone}
-                        className={cn(MENU_BUTTON, "gap-1")}
-                      >
-                        <MicVocalIcon className={MENU_ICON} />
-                        <span className={MENU_BUTTON_TEXT}>{tone || "Tone"}</span>
-                      </button>
-                    </DropdownMenu.Trigger>
-                    <MenuContent
-                      align="start"
-                      aria-label="Tone"
-                      className="w-max"
-                      onCloseAutoFocus={(e) => {
-                        e.preventDefault();
-                        inputRef.current?.focus();
-                      }}
-                    >
-                      <DropdownMenu.RadioGroup value={tone} onValueChange={setTone}>
-                        <MenuRadioItem value="" label="Default tone" />
-                        {TONES.map((name) => (
-                          <MenuRadioItem key={name} value={name} label={name} />
-                        ))}
-                      </DropdownMenu.RadioGroup>
-                    </MenuContent>
-                  </DropdownMenu.Root>
                   <div className={SELECT_WRAPPER}>
                     <label htmlFor="ai-menu-model">Model</label>
                     <span aria-hidden="true" className="max-w-44 truncate text-text">
@@ -763,42 +628,24 @@ export const AiMenu = memo(function AiMenu({
           role="listbox"
           aria-label="Suggestions"
           style={listStyle}
-          className={cn(LIST_BOX, "left-0", listPosition)}
+          className={cn(LIST_BOX, "left-0 flex flex-col gap-px", listPosition)}
         >
-          {groups.map((group, index) => (
+          {skills.map((skill, index) => (
             <div
-              key={group.label}
-              role="group"
-              aria-labelledby={`ai-menu-group-${index}`}
-              className={cn(
-                "flex flex-col gap-px",
-                index > 0 && "mt-2 pt-2 border-t border-bg-emphasis",
-              )}
+              key={skill.label}
+              id={optionId(index)}
+              role="option"
+              aria-selected={skill === active}
+              onMouseEnter={() => setActiveIndex(index)}
+              onClick={() => chooseSkill(skill)}
+              className={LIST_ITEM}
             >
-              <div
-                id={`ai-menu-group-${index}`}
-                aria-hidden="true"
-                className={LIST_LABEL}
-              >
-                {group.label}
-              </div>
-              {group.skills.map((skill) => renderOption(skill, optionIndex++, "main"))}
+              {skill.icon && <skill.icon className={MENU_ICON} />}
+              <span className={cn(MENU_BUTTON_TEXT, "flex-1 truncate")}>
+                {skill.label}
+              </span>
             </div>
           ))}
-        </div>
-      )}
-
-      {subItems && subSkill && (
-        <div
-          role="listbox"
-          aria-label={subSkill.label}
-          style={listStyle}
-          className={cn(LIST_BOX, "left-[calc(13rem-2px)]", listPosition)}
-        >
-          <div aria-hidden="true" className={LIST_LABEL}>
-            {subSkill.label}
-          </div>
-          {subItems.map((skill, index) => renderOption(skill, index, "sub"))}
         </div>
       )}
 
