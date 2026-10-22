@@ -64,6 +64,8 @@ export interface AiMenuProps {
   onClose: () => void;
   /** Called when the menu size changes, so the position can update. */
   onLayoutChange: () => void;
+  /** Called when pi starts or stops writing an answer. */
+  onStreamingChange: (streaming: boolean) => void;
 }
 
 type Status = "idle" | "streaming" | "done" | "error";
@@ -99,6 +101,7 @@ export const AiMenu = memo(function AiMenu({
   onApply,
   onClose,
   onLayoutChange,
+  onStreamingChange,
 }: AiMenuProps) {
   const [sessionId] = useState(() => crypto.randomUUID());
   const [prompt, setPrompt] = useState("");
@@ -120,10 +123,6 @@ export const AiMenu = memo(function AiMenu({
   const [expanded, setExpanded] = useState(!initialRun);
   const [inputFocused, setInputFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
-  const [listPlacement, setListPlacement] = useState({
-    above: false,
-    maxHeight: 400,
-  });
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
@@ -131,7 +130,6 @@ export const AiMenu = memo(function AiMenu({
   const runIdRef = useRef(0);
   const initialSentRef = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
-  const cardRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const answerRef = useRef<HTMLDivElement>(null);
 
@@ -171,7 +169,10 @@ export const AiMenu = memo(function AiMenu({
   // Esc works and keys do not go to the document.
   useEffect(() => {
     const id = requestAnimationFrame(() =>
-      (initialRun ? rootRef.current : inputRef.current)?.focus(),
+      // The editor scrolls the menu into view, not the focus.
+      (initialRun ? rootRef.current : inputRef.current)?.focus({
+        preventScroll: true,
+      }),
     );
     return () => cancelAnimationFrame(id);
   }, [initialRun]);
@@ -213,6 +214,13 @@ export const AiMenu = memo(function AiMenu({
     return () => cancelAnimationFrame(id);
   }, [text, busy, status, readOnly, renderMarkdown, onPreview]);
 
+  useEffect(() => onStreamingChange(busy), [busy, onStreamingChange]);
+
+  // The suggestion list is below the card, outside of its size.
+  useLayoutEffect(() => {
+    if (listOpen) onLayoutChange();
+  }, [listOpen, onLayoutChange]);
+
   useLayoutEffect(() => {
     const root = rootRef.current;
     if (!root) return;
@@ -232,20 +240,6 @@ export const AiMenu = memo(function AiMenu({
     }
   }, [prompt, expanded, status]);
 
-  // The suggestion list goes below the card, or above it without room.
-  useLayoutEffect(() => {
-    if (!listOpen) return;
-    const card = cardRef.current?.getBoundingClientRect();
-    if (!card) return;
-    const below = window.innerHeight - card.bottom - 14;
-    const above = card.top - 14;
-    const placeAbove = below < 200 && above > below;
-    setListPlacement({
-      above: placeAbove,
-      maxHeight: Math.max(placeAbove ? above : below, 120),
-    });
-  }, [listOpen, expanded]);
-
   const run = useCallback(
     (aiRun: AiRun) => {
       const runId = ++runIdRef.current;
@@ -257,7 +251,7 @@ export const AiMenu = memo(function AiMenu({
       setExpanded(false);
       setActiveIndex(0);
       // The input goes away while pi writes: keep the focus in the menu.
-      rootRef.current?.focus();
+      rootRef.current?.focus({ preventScroll: true });
       if (aiRun.readOnly) onPreview(null);
       promptPi(
         sessionId,
@@ -364,10 +358,6 @@ export const AiMenu = memo(function AiMenu({
         : "Tell AI what else needs to be changed..."
       : "Ask AI what you want...";
 
-  const listStyle = {
-    maxHeight: listPlacement.maxHeight,
-  };
-  const listPosition = listPlacement.above ? "bottom-full mb-1.5" : "top-full mt-1.5";
 
   return (
     <div
@@ -386,7 +376,6 @@ export const AiMenu = memo(function AiMenu({
       className="relative w-full outline-none animate-fade-in motion-reduce:animate-none"
     >
       <div
-        ref={cardRef}
         className={cn(CARD_BOX, "flex flex-col rounded-[18px] overflow-hidden")}
       >
         {readOnly && text && (
@@ -622,8 +611,7 @@ export const AiMenu = memo(function AiMenu({
           id="ai-menu-list"
           role="listbox"
           aria-label="Suggestions"
-          style={listStyle}
-          className={cn(LIST_BOX, "left-0 flex flex-col gap-px", listPosition)}
+          className={cn(LIST_BOX, "top-full mt-1.5 left-0 flex flex-col gap-px")}
         >
           {skills.map((skill, index) => (
             <div

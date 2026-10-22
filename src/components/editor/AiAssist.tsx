@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Extension, posToDOMRect, type Editor as TiptapEditor } from "@tiptap/core";
+import { Extension, type Editor as TiptapEditor } from "@tiptap/core";
 import { ReactRenderer } from "@tiptap/react";
 import type { Fragment, Node as PMNode } from "@tiptap/pm/model";
 import { DOMSerializer } from "@tiptap/pm/model";
@@ -310,6 +310,52 @@ export interface AiRun {
 }
 
 const MIN_MENU_WIDTH = 320;
+/** Space between the target and the AI menu. */
+const MENU_OFFSET = 4;
+/** Space between the AI menu and the bottom of the scroll container. */
+const SCROLL_MARGIN = 12;
+
+/**
+ * The top-level block element that contains `pos`. Between two top-level
+ * blocks, the block before `pos`.
+ */
+function topBlockDom(editor: TiptapEditor, pos: number): HTMLElement | null {
+  const { doc } = editor.state;
+  const $pos = doc.resolve(Math.max(0, Math.min(pos, doc.content.size)));
+  const blockPos =
+    $pos.depth > 0
+      ? $pos.before(1)
+      : $pos.nodeBefore
+        ? pos - $pos.nodeBefore.nodeSize
+        : null;
+  const dom = blockPos === null ? null : editor.view.nodeDOM(blockPos);
+  return dom instanceof HTMLElement ? dom : null;
+}
+
+/** False for an element that is not rendered (`display: none`). */
+const isRendered = (element: Element | null): element is Element =>
+  !!element && element.getClientRects().length > 0;
+
+/** The nearest ancestor that scrolls vertically. */
+function scrollParent(element: HTMLElement): HTMLElement | null {
+  for (let node = element.parentElement; node; node = node.parentElement) {
+    if (/(auto|scroll)/.test(getComputedStyle(node).overflowY)) return node;
+  }
+  return null;
+}
+
+/** The height of the AI menu, with the suggestion list below the card. */
+function menuExtent(element: HTMLElement): number {
+  const top = element.getBoundingClientRect().top;
+  const lists = element.querySelectorAll("[role='listbox']");
+  return Math.max(
+    element.offsetHeight,
+    ...Array.from(lists, (list) => list.getBoundingClientRect().bottom - top),
+  );
+}
+
+const prefersReducedMotion = () =>
+  window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 /**
  * Inline AI for the editor: Mod+J, the "/Ask AI" slash command, and the AI
@@ -319,13 +365,14 @@ const MIN_MENU_WIDTH = 320;
  */
 export function useAiAssist(editor: TiptapEditor | null) {
   const popupRef = useRef<TippyInstance | null>(null);
-  const stopWatchingDocRef = useRef<(() => void) | null>(null);
+  // Removes the listeners and the scroll space of the open AI menu.
+  const cleanupRef = useRef<(() => void) | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
 
   const closePopover = useCallback(
     (focusEditor: boolean) => {
-      stopWatchingDocRef.current?.();
-      stopWatchingDocRef.current = null;
+      cleanupRef.current?.();
+      cleanupRef.current = null;
       const popup = popupRef.current;
       if (!popup) return;
       popupRef.current = null;
@@ -349,7 +396,16 @@ export function useAiAssist(editor: TiptapEditor | null) {
       const range = { from, to };
       setAiHighlight(editor, range);
       const preview = createPreview(editor, range);
-      const updatePosition = () => popupRef.current?.popperInstance?.update();
+      const scroller = scrollParent(editor.view.dom);
+      // Scroll with the answer until the user scrolls during the stream.
+      let follow = true;
+      let streaming = !!initial;
+      // Space below the document, so that the menu can scroll into view.
+      // WebKit does not scroll into a bottom margin: use the padding.
+      let extraSpace = 0;
+      const basePadding = parseFloat(
+        getComputedStyle(editor.view.dom).paddingBottom,
+      );
 
       const props: AiMenuProps = {
         mode: empty ? "cursor" : "selection",
@@ -359,33 +415,88 @@ export function useAiAssist(editor: TiptapEditor | null) {
           renderMarkdown(editor, markdown, target),
         onPreview: (markdown) => {
           preview(markdown);
-          updatePosition();
+          layoutChanged();
         },
         onApply: (markdown, action) => {
           closePopover(false);
           applyMarkdown(editor, range, markdown, action);
         },
         onClose: () => closePopover(true),
-        onLayoutChange: updatePosition,
+        onLayoutChange: () => layoutChanged(),
+        onStreamingChange: (value) => {
+          streaming = value;
+          // A new answer: follow it again.
+          if (value) follow = true;
+        },
       };
       const component = new ReactRenderer(AiMenu, { props, editor });
 
-      // Below the top-level block of the target, as wide as the block.
+      // The end of the target: the bottom of the streamed answer, or of the
+      // top-level block at the end of the range when it shows (a block that
+      // the answer replaces is hidden). As wide as the first block.
       const anchorRect = () => {
-        const { view, state } = editor;
-        const $to = state.doc.resolve(Math.min(to, state.doc.content.size));
-        const block = $to.depth > 0 ? view.nodeDOM($to.before(1)) : null;
-        const rect =
-          block instanceof HTMLElement
-            ? block.getBoundingClientRect()
-            : posToDOMRect(view, from, to);
+        const answer = editor.view.dom.querySelector(".ai-insertion");
+        // The last position in the range: a range that ends at the start of
+        // a block ends in the block before.
+        const end = to > from ? to - 1 : to;
+        const ends = [answer, topBlockDom(editor, end)]
+          .filter(isRendered)
+          .map((element) => element.getBoundingClientRect().bottom);
+        const first = topBlockDom(editor, from) ?? editor.view.dom;
+        const { left, width: blockWidth } = first.getBoundingClientRect();
+        const bottom = ends.length
+          ? Math.max(...ends)
+          : editor.view.coordsAtPos(to).bottom;
         const width = Math.min(
-          Math.max(rect.width, MIN_MENU_WIDTH),
+          Math.max(blockWidth, MIN_MENU_WIDTH),
           window.innerWidth - 16,
         );
         component.element.style.width = `${width}px`;
-        return rect;
+        return new DOMRect(left, bottom, blockWidth, 0);
       };
+
+      // Scrolls the editor so that the AI menu fits below the target. It
+      // uses the target position, not the menu position: the menu moves
+      // only after the scroll.
+      const reveal = () => {
+        if (!follow || !scroller) return;
+        const viewBottom = Math.min(
+          scroller.getBoundingClientRect().bottom,
+          window.innerHeight,
+        );
+        const menuBottom =
+          anchorRect().bottom + MENU_OFFSET + menuExtent(component.element);
+        const overflow = menuBottom + SCROLL_MARGIN - viewBottom;
+        if (overflow <= 0) return;
+        const room =
+          scroller.scrollHeight - scroller.clientHeight - scroller.scrollTop;
+        if (room < overflow) {
+          extraSpace += Math.ceil(overflow - room);
+          editor.view.dom.style.paddingBottom = `${basePadding + extraSpace}px`;
+        }
+        // While pi writes, each change scrolls a small step: no animation.
+        const smooth = !streaming && !prefersReducedMotion();
+        scroller.scrollTo({
+          top: scroller.scrollTop + overflow,
+          behavior: smooth ? "smooth" : "instant",
+        });
+      };
+
+      const layoutChanged = () => {
+        popupRef.current?.popperInstance?.update();
+        reveal();
+      };
+
+      // A scroll by the user (wheel, touch, scroll bar) stops the follow.
+      const stopFollowing = () => {
+        follow = false;
+      };
+      const onScrollerPointerDown = (e: PointerEvent) => {
+        if (e.target === scroller) stopFollowing();
+      };
+      scroller?.addEventListener("wheel", stopFollowing, { passive: true });
+      scroller?.addEventListener("touchmove", stopFollowing, { passive: true });
+      scroller?.addEventListener("pointerdown", onScrollerPointerDown);
 
       popupRef.current = tippy(document.body, {
         getReferenceClientRect: anchorRect,
@@ -396,14 +507,16 @@ export function useAiAssist(editor: TiptapEditor | null) {
         trigger: "manual",
         hideOnClick: false,
         placement: "bottom-start",
-        offset: [0, 4],
+        offset: [0, MENU_OFFSET],
         maxWidth: "none",
         popperOptions: {
+          // Always below the target: never above it, and never moved up
+          // over it. `reveal` scrolls it into view instead.
           modifiers: [
-            { name: "flip", options: { fallbackPlacements: ["top-start"] } },
+            { name: "flip", enabled: false },
             {
               name: "preventOverflow",
-              options: { altAxis: true, tether: false, padding: 8 },
+              options: { altAxis: false, padding: 8 },
             },
           ],
         },
@@ -421,7 +534,13 @@ export function useAiAssist(editor: TiptapEditor | null) {
         if (transaction.docChanged) closePopover(false);
       };
       editor.on("transaction", onTransaction);
-      stopWatchingDocRef.current = () => editor.off("transaction", onTransaction);
+      cleanupRef.current = () => {
+        editor.off("transaction", onTransaction);
+        scroller?.removeEventListener("wheel", stopFollowing);
+        scroller?.removeEventListener("touchmove", stopFollowing);
+        scroller?.removeEventListener("pointerdown", onScrollerPointerDown);
+        if (extraSpace) editor.view.dom.style.paddingBottom = "";
+      };
     },
     [editor, closePopover],
   );
