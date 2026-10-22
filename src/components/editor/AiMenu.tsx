@@ -36,6 +36,7 @@ import type { Settings } from "../../types/note";
 import { cn } from "../../lib/utils";
 import type { AiRun } from "./AiAssist";
 import { CURSOR_SKILLS, type AiSkill } from "./aiSkills";
+import { ESCAPE_LAYER, useEscapeLayer } from "./escapeLayers";
 import {
   CARD_BOX,
   MENU_BUTTON,
@@ -330,17 +331,11 @@ export const AiMenu = memo(function AiMenu({
       .finally(() => setTimeout(() => setCopyState("idle"), 1500));
   }, [text]);
 
-  const handleKeyDown = useCallback(
-    (e: KeyboardEvent<HTMLDivElement>) => {
-      // Keep keys away from the global app and editor shortcuts.
-      e.stopPropagation();
-      if (e.key !== "Escape" || e.defaultPrevented) return;
-      e.preventDefault();
-      if (busy) stop();
-      else onClose();
-    },
-    [busy, stop, onClose],
-  );
+  // Esc stops pi while it writes, else it discards the answer.
+  useEscapeLayer(true, ESCAPE_LAYER.menu, busy ? stop : onClose);
+
+  // Keep keys away from the global app and editor shortcuts.
+  const handleKeyDown = (e: KeyboardEvent<HTMLDivElement>) => e.stopPropagation();
 
   const handleInputKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.nativeEvent.isComposing) return;

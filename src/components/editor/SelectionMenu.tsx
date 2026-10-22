@@ -43,6 +43,7 @@ import { isMac, mod, shift } from "../../lib/platform";
 import { cn } from "../../lib/utils";
 import { setAiHighlight, type AiRun } from "./AiAssist";
 import { IMPROVE_GROUPS, type AiSkill } from "./aiSkills";
+import { ESCAPE_LAYER, useEscapeLayer } from "./escapeLayers";
 import {
   isInMenuLayer,
   MENU_BUTTON,
@@ -239,6 +240,10 @@ export function SelectionMenu({
   const [dragging, setDragging] = useState(false);
   const [dismissed, setDismissed] = useState(false);
   const [openMenu, setOpenMenu] = useState<OpenMenu>(null);
+  // The label of the open sub-menu of "Improve".
+  const [openSub, setOpenSub] = useState<string | null>(null);
+  // The bubble menu plugin shows the toolbar element.
+  const [shown, setShown] = useState(false);
   const [focusIndex, setFocusIndex] = useState(0);
   const menuRef = useRef<HTMLDivElement>(null);
   const toolbarRef = useRef<HTMLDivElement>(null);
@@ -293,11 +298,13 @@ export function SelectionMenu({
       // The plugin element only positions the toolbar: keep it out of the tab
       // order (the plugin sets tabIndex 0) and above the editor content.
       onShow: () => {
+        setShown(true);
         const element = menuRef.current;
         if (!element) return;
         element.tabIndex = -1;
         element.style.zIndex = "20";
       },
+      onHide: () => setShown(false),
     }),
     [],
   );
@@ -360,28 +367,19 @@ export function SelectionMenu({
     if (!editor.view.hasFocus()) editor.commands.focus();
   }, [editor]);
 
-  // Esc closes the toolbar (a dropdown closes itself first). Alt+F10 moves
-  // the focus from the editor into the toolbar.
+  // Alt+F10 moves the focus from the editor into the toolbar.
   useEffect(() => {
-    if (!visible || openMenu) return;
+    if (!visible || !shown || openMenu) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "F10" && e.altKey && editor.view.hasFocus()) {
-        e.preventDefault();
-        toolbarRef.current
-          ?.querySelector<HTMLButtonElement>("[data-toolbar-item][tabindex='0']")
-          ?.focus();
-        return;
-      }
-      if (e.key !== "Escape") return;
-      const inMenu = !!toolbarRef.current?.contains(document.activeElement);
-      if (!inMenu && !editor.view.hasFocus()) return;
+      if (e.key !== "F10" || !e.altKey || !editor.view.hasFocus()) return;
       e.preventDefault();
-      e.stopPropagation();
-      close();
+      toolbarRef.current
+        ?.querySelector<HTMLButtonElement>("[data-toolbar-item][tabindex='0']")
+        ?.focus();
     };
     document.addEventListener("keydown", onKeyDown, true);
     return () => document.removeEventListener("keydown", onKeyDown, true);
-  }, [visible, openMenu, editor, close]);
+  }, [visible, shown, openMenu, editor]);
 
   // The focus leaves the editor for a dropdown: keep the selection visible
   // until the editor has the focus again. WebKit keeps the DOM selection only
@@ -401,6 +399,7 @@ export function SelectionMenu({
   const changeMenu = useCallback(
     (menu: Exclude<OpenMenu, null>, open: boolean) => {
       setOpenMenu(open ? menu : null);
+      setOpenSub(null);
       if (open) {
         const { from, to } = editor.state.selection;
         highlightRef.current = true;
@@ -427,6 +426,19 @@ export function SelectionMenu({
     },
     [editor],
   );
+
+  // Esc closes the innermost layer: sub-menu, dropdown, then the toolbar.
+  useEscapeLayer(visible && shown, ESCAPE_LAYER.toolbar, close);
+  useEscapeLayer(!!openMenu, ESCAPE_LAYER.menu, () => {
+    if (openMenu) changeMenu(openMenu, false);
+  });
+  useEscapeLayer(!!openSub, ESCAPE_LAYER.subMenu, () => {
+    // The focus goes back to the item of the sub-menu, as with ArrowLeft.
+    menuRef.current
+      ?.querySelector<HTMLElement>("[role='menuitem'][aria-expanded='true']")
+      ?.focus();
+    setOpenSub(null);
+  });
 
   const run = useCallback(
     (aiRun: AiRun) => {
@@ -497,7 +509,11 @@ export function SelectionMenu({
 
   const renderSkill = (skill: AiSkill) =>
     skill.items ? (
-      <DropdownMenu.Sub key={skill.label}>
+      <DropdownMenu.Sub
+        key={skill.label}
+        open={openSub === skill.label}
+        onOpenChange={(open) => setOpenSub(open ? skill.label : null)}
+      >
         <MenuSubTrigger icon={skill.icon} label={skill.label} />
         <MenuSubContent container={menuRef.current}>
           {skill.items.map((sub) => (
