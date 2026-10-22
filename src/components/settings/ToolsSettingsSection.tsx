@@ -15,8 +15,13 @@ import * as aiService from "../../services/ai";
 import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
-import { PI_THINKING_LEVELS } from "../../services/pi";
-import { PiModelOptions, usePiModels } from "../ai/PiModelOptions";
+import {
+  findPiModel,
+  PiModelOptions,
+  PiThinkingOptions,
+  resolvePiDefaults,
+  usePiModels,
+} from "../ai/PiModelOptions";
 import type { Settings } from "../../types/note";
 
 type CliState = {
@@ -107,6 +112,12 @@ function PiSettings() {
   });
   const [saved, setSaved] = useState(values);
   const [models, retryModels] = usePiModels();
+  // Without a saved (or a known) value, the selects show the pi defaults.
+  const defaults =
+    models.status === "ready" ? resolvePiDefaults(models, values) : null;
+  const levels = defaults
+    ? (findPiModel(models, defaults.model)?.thinkingLevels ?? [])
+    : [];
 
   useEffect(() => {
     invoke<Settings>("get_settings")
@@ -147,11 +158,12 @@ function PiSettings() {
     <div className="rounded-[10px] border border-border pl-4 py-3 pr-3 space-y-3">
       <div className="flex items-center justify-between gap-4">
         <label htmlFor="pi-model" className="text-sm text-text font-medium">
-          Model
+          Default model
         </label>
         <Select
           id="pi-model"
-          value={values.piModel}
+          value={defaults?.model ?? ""}
+          disabled={!defaults?.model}
           onChange={(e) => {
             const value = e.target.value;
             setValues((v) => ({ ...v, piModel: value }));
@@ -162,7 +174,7 @@ function PiSettings() {
           }
           className="w-64"
         >
-          <PiModelOptions state={models} value={values.piModel} />
+          <PiModelOptions state={models} />
         </Select>
       </div>
       {models.status === "loading" && (
@@ -188,11 +200,12 @@ function PiSettings() {
       )}
       <div className="flex items-center justify-between gap-4">
         <label htmlFor="pi-thinking" className="text-sm text-text font-medium">
-          Thinking
+          Default thinking
         </label>
         <Select
           id="pi-thinking"
-          value={values.piThinking}
+          value={defaults?.thinking ?? ""}
+          disabled={levels.length === 0}
           onChange={(e) => {
             const value = e.target.value;
             setValues((v) => ({ ...v, piThinking: value }));
@@ -200,11 +213,11 @@ function PiSettings() {
           }}
           className="w-64"
         >
-          {PI_THINKING_LEVELS.map((opt) => (
-            <option key={opt.value} value={opt.value}>
-              {opt.label}
-            </option>
-          ))}
+          {levels.length > 0 ? (
+            <PiThinkingOptions levels={levels} />
+          ) : (
+            <PiModelOptions state={models} />
+          )}
         </Select>
       </div>
       <div className="flex items-center justify-between gap-4">
@@ -224,9 +237,10 @@ function PiSettings() {
         />
       </div>
       <p className="text-xs text-text-muted">
-        Model and thinking are the start values for each new popover; you can
-        also change them in the popover. Lower thinking levels give faster
-        answers. Leave the path empty to find pi on your PATH.
+        Each new AI conversation starts with the default model and thinking
+        level. A change in the AI menu is only for that conversation. The list
+        shows the scoped models of pi (enabledModels). Lower thinking levels
+        give faster answers. Leave the path empty to find pi on your PATH.
       </p>
     </div>
   );

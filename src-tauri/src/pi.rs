@@ -26,8 +26,10 @@ const SELECTION_END: &str = "⟦/selection⟧";
 const CURSOR: &str = "⟦cursor⟧";
 const NOT_FOUND: &str = "pi not found. Install pi or set its path in Settings.";
 const STDERR_TAIL_BYTES: usize = 4096;
-/// Time pi has to answer `get_available_models` or `set_model`.
+/// Time pi has to answer one command, for example `set_model`.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
+/// Maximum number of `cycle_model` calls to read the scoped models.
+const MAX_SCOPED_MODELS: usize = 100;
 /// pi thinking levels, from lowest to highest.
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 
@@ -90,29 +92,52 @@ fn thinking_levels(model: &Value) -> Vec<String> {
         .collect()
 }
 
-/// Reads the `get_available_models` response. Skips entries without an id
-/// or provider.
-fn parse_models(response: &Value) -> Result<Vec<PiModel>, String> {
+/// The models for the model selects, and the model and thinking level that
+/// pi uses when it starts.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PiModelList {
+    pub models: Vec<PiModel>,
+    /// `provider/modelId`. `None` when pi has no usable model.
+    pub default_model: Option<String>,
+    pub default_thinking: Option<String>,
+}
+
+/// Reads a pi model object. `None` without an id or provider.
+fn parse_model(model: &Value) -> Option<PiModel> {
+    let id = model["id"].as_str()?;
+    let provider = model["provider"].as_str()?;
+    Some(PiModel {
+        provider: provider.to_string(),
+        id: id.to_string(),
+        name: model["name"].as_str().unwrap_or(id).to_string(),
+        thinking_levels: thinking_levels(model),
+    })
+}
+
+impl PiModel {
+    /// `provider/modelId`, the form of `PromptRequest::model`.
+    fn key(&self) -> String {
+        format!("{}/{}", self.provider, self.id)
+    }
+}
+
+/// The data of a successful command response.
+fn response_data(response: &Value) -> Result<&Value, String> {
     if response["success"] != true {
         let error = response["error"].as_str().unwrap_or("unknown error");
         return Err(format!("pi could not list the models: {error}"));
     }
-    let models = response["data"]["models"]
+    Ok(&response["data"])
+}
+
+/// Reads the `get_available_models` response. Skips entries without an id
+/// or provider.
+fn parse_models(response: &Value) -> Result<Vec<PiModel>, String> {
+    let models = response_data(response)?["models"]
         .as_array()
         .ok_or("pi returned no model list.")?;
-    Ok(models
-        .iter()
-        .filter_map(|model| {
-            let id = model["id"].as_str()?;
-            let provider = model["provider"].as_str()?;
-            Some(PiModel {
-                provider: provider.to_string(),
-                id: id.to_string(),
-                name: model["name"].as_str().unwrap_or(id).to_string(),
-                thinking_levels: thinking_levels(model),
-            })
-        })
-        .collect())
+    Ok(models.iter().filter_map(parse_model).collect())
 }
 
 /// Event sent to the frontend for one prompt run.
@@ -589,8 +614,73 @@ fn read_stdout(
     }
 }
 
-/// Starts a short-lived pi and asks it for the models it can use.
-fn list_models(program: &str, path_env: &str) -> Result<Vec<PiModel>, String> {
+/// Sends commands to a short-lived pi and reads the responses.
+struct PiCommands {
+    stdin: ChildStdin,
+    responses: mpsc::Receiver<Value>,
+    stderr_reader: Option<JoinHandle<String>>,
+}
+
+impl PiCommands {
+    /// Sends `command` and waits for its response.
+    fn ask(&mut self, command: &str) -> Result<Value, String> {
+        writeln!(self.stdin, "{}", serde_json::json!({ "type": command }))
+            .map_err(|e| format!("Failed to ask pi for the models: {e}"))?;
+        loop {
+            match self.responses.recv_timeout(COMMAND_TIMEOUT) {
+                Ok(value) if value["command"] == command => return Ok(value),
+                Ok(_) => continue,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err("pi did not list the models in time.".to_string())
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    let stderr = self
+                        .stderr_reader
+                        .take()
+                        .and_then(|reader| reader.join().ok())
+                        .unwrap_or_default();
+                    return Err(exit_message(&stderr));
+                }
+            }
+        }
+    }
+}
+
+/// Reads the models of the pi scope (`enabledModels`) with `cycle_model`,
+/// in the cycle order after `start`. `None` when pi has no scope.
+fn scoped_models(
+    pi: &mut PiCommands,
+    start: Option<&str>,
+) -> Result<Option<Vec<PiModel>>, String> {
+    let mut models: Vec<PiModel> = Vec::new();
+    while models.len() < MAX_SCOPED_MODELS {
+        let data = response_data(&pi.ask("cycle_model")?)?.clone();
+        if data["isScoped"] != true {
+            return Ok(None);
+        }
+        let Some(model) = parse_model(&data["model"]) else {
+            break;
+        };
+        let key = model.key();
+        if models.iter().any(|m| m.key() == key) {
+            break;
+        }
+        let back_at_start = start == Some(key.as_str());
+        models.push(model);
+        if back_at_start {
+            break;
+        }
+    }
+    // The start model goes first.
+    if let Some(index) = models.iter().position(|m| Some(m.key().as_str()) == start) {
+        models.rotate_left(index);
+    }
+    Ok(Some(models))
+}
+
+/// Starts a short-lived pi and asks it for the models it can use: the scoped
+/// models, else all available models. pi resolves the scope patterns.
+fn list_models(program: &str, path_env: &str) -> Result<PiModelList, String> {
     let mut child = no_window_cmd(program)
         .args(build_args())
         .env("PATH", path_env)
@@ -600,7 +690,7 @@ fn list_models(program: &str, path_env: &str) -> Result<Vec<PiModel>, String> {
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start pi: {e}"))?;
-    let (Some(mut stdin), Some(stdout), Some(stderr)) =
+    let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
         let _ = child.kill();
@@ -608,40 +698,43 @@ fn list_models(program: &str, path_env: &str) -> Result<Vec<PiModel>, String> {
         return Err("Failed to connect to pi.".to_string());
     };
     let stderr_reader = std::thread::spawn(move || read_stderr_tail(stderr));
-    let (reply, response) = mpsc::channel();
+    let (reply, responses) = mpsc::channel();
     std::thread::spawn(move || {
         for line in BufReader::new(stdout).split(b'\n') {
             let Ok(bytes) = line else { break };
             let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
                 continue;
             };
-            if value["type"] == "response" && value["command"] == "get_available_models" {
-                let _ = reply.send(value);
+            if value["type"] == "response" && reply.send(value).is_err() {
                 return;
             }
         }
     });
-    // Keep stdin open until the answer: pi stops at the end of its input.
-    let sent = writeln!(
+    // Keep stdin open until the last answer: pi stops at the end of its input.
+    let mut pi = PiCommands {
         stdin,
-        "{}",
-        serde_json::json!({ "type": "get_available_models" })
-    );
-    let result = match sent {
-        Err(e) => Err(format!("Failed to ask pi for the models: {e}")),
-        Ok(()) => match response.recv_timeout(COMMAND_TIMEOUT) {
-            Ok(value) => parse_models(&value),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err("pi did not list the models in time.".to_string())
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err(exit_message(&stderr_reader.join().unwrap_or_default()))
-            }
-        },
+        responses,
+        stderr_reader: Some(stderr_reader),
     };
+    let result = read_model_list(&mut pi);
     let _ = child.kill();
     let _ = child.wait();
     result
+}
+
+fn read_model_list(pi: &mut PiCommands) -> Result<PiModelList, String> {
+    let state = response_data(&pi.ask("get_state")?)?.clone();
+    let default_model = parse_model(&state["model"]).map(|model| model.key());
+    let default_thinking = state["thinkingLevel"].as_str().map(str::to_string);
+    let models = match scoped_models(pi, default_model.as_deref())? {
+        Some(models) => models,
+        None => parse_models(&pi.ask("get_available_models")?)?,
+    };
+    Ok(PiModelList {
+        models,
+        default_model,
+        default_thinking,
+    })
 }
 
 fn read_stderr_tail(mut stderr: std::process::ChildStderr) -> String {
@@ -678,14 +771,15 @@ struct Session {
 
 /// The model list for one pi program, kept for the app session.
 #[derive(Default)]
-pub struct PiModels(Mutex<Option<(String, Vec<PiModel>)>>);
+pub struct PiModels(Mutex<Option<(String, PiModelList)>>);
 
-/// Returns the models that pi can use. Asks pi once per app session.
+/// Returns the models that pi can use, and the pi defaults. Asks pi once per
+/// app session.
 #[tauri::command]
 pub async fn pi_list_models(
     app: AppHandle,
     app_state: State<'_, AppState>,
-) -> Result<Vec<PiModel>, String> {
+) -> Result<PiModelList, String> {
     let path_override = app_state
         .settings
         .read()
@@ -891,7 +985,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_the_model_list_response() {
+    fn parses_the_available_models_response() {
         let response = serde_json::json!({
             "type": "response",
             "command": "get_available_models",
@@ -1450,22 +1544,123 @@ done"#,
         assert!(process.slot.lock().unwrap().active.is_none());
     }
 
+    /// A fake pi for `list_models`. `get_state` returns `state_model` (JSON
+    /// model object or `null`) and the level `medium`. Each `cycle_model`
+    /// returns the next line of `cycle` (shell `case` arms for `$n`, the
+    /// 1-based call count). `get_available_models` returns one model.
+    #[cfg(unix)]
+    fn model_list_fake_pi(state_model: &str, cycle: &str) -> (tempfile_path::TempScript, String) {
+        fake_pi(&format!(
+            r#"n=0
+while read line; do
+case "$line" in
+*'"type":"get_state"'*)
+printf '%s\n' '{{"type":"agent_start"}}'
+printf '%s\n' '{{"type":"response","command":"get_state","success":true,"data":{{"model":{state_model},"thinkingLevel":"medium"}}}}';;
+*'"type":"cycle_model"'*)
+n=$((n+1))
+case $n in
+{cycle}
+esac;;
+*'"type":"get_available_models"'*)
+printf '%s\n' '{{"type":"response","command":"get_available_models","success":true,"data":{{"models":[{{"id":"all-1","provider":"p","reasoning":false}}]}}}}';;
+esac
+done"#
+        ))
+    }
+
+    fn fake_model(provider: &str, id: &str) -> String {
+        format!(r#"{{"id":"{id}","name":"{id}","provider":"{provider}","reasoning":true}}"#)
+    }
+
+    /// A `cycle_model` case arm that answers with `data`.
+    fn cycle_arm(n: &str, data: &str) -> String {
+        format!(
+            r#"{n}) printf '%s\n' '{{"type":"response","command":"cycle_model","success":true,"data":{data}}}';;"#
+        )
+    }
+
+    fn scoped(model: &str) -> String {
+        format!(r#"{{"model":{model},"thinkingLevel":"high","isScoped":true}}"#)
+    }
+
+    fn keys(list: &PiModelList) -> Vec<String> {
+        list.models
+            .iter()
+            .map(|m| format!("{}/{}", m.provider, m.id))
+            .collect()
+    }
+
     #[cfg(unix)]
     #[test]
-    fn list_models_reads_the_response_and_stops_pi() {
+    fn list_models_returns_the_scoped_models_and_the_pi_defaults() {
+        let (a, b, c) = (
+            fake_model("anthropic", "a"),
+            fake_model("nvidia", "z-ai/b"),
+            fake_model("openai", "c"),
+        );
+        // pi starts with b and cycles c, a, b, c, ...
+        let cycle = [
+            cycle_arm("1|4", &scoped(&c)),
+            cycle_arm("2|5", &scoped(&a)),
+            cycle_arm("3|6", &scoped(&b)),
+        ]
+        .join("\n");
+        let (_script, program) = model_list_fake_pi(&b, &cycle);
+        let started = std::time::Instant::now();
+        let list = list_models(&program, &get_expanded_path()).unwrap();
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        assert_eq!(keys(&list), ["nvidia/z-ai/b", "openai/c", "anthropic/a"]);
+        assert_eq!(list.default_model.as_deref(), Some("nvidia/z-ai/b"));
+        assert_eq!(list.default_thinking.as_deref(), Some("medium"));
+        assert_eq!(
+            list.models[0].thinking_levels,
+            ["off", "minimal", "low", "medium", "high"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_models_without_a_scope_returns_all_models() {
+        let a = fake_model("anthropic", "a");
+        for data in [
+            "null".to_string(),
+            format!(r#"{{"model":{a},"thinkingLevel":"high","isScoped":false}}"#),
+        ] {
+            let (_script, program) = model_list_fake_pi(&a, &cycle_arm("*", &data));
+            let list = list_models(&program, &get_expanded_path()).unwrap();
+            assert_eq!(keys(&list), ["p/all-1"], "cycle data {data}");
+            assert_eq!(list.default_model.as_deref(), Some("anthropic/a"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_models_stops_a_cycle_that_does_not_come_back() {
+        // A scope that does not contain the start model, and a pi that never
+        // repeats a model: the list stops at the limit.
+        let (_script, program) = model_list_fake_pi(
+            "null",
+            &cycle_arm("*", &scoped(&fake_model("p", "m-'\"$n\"'"))),
+        );
+        let list = list_models(&program, &get_expanded_path()).unwrap();
+        assert_eq!(list.models.len(), MAX_SCOPED_MODELS);
+        assert_eq!(list.models[1].id, "m-2");
+        assert_eq!(list.default_model, None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn list_models_reports_a_failed_command() {
         let (_script, program) = fake_pi(
             r#"read line
-case "$line" in *'"type":"get_available_models"'*)
-printf '%s\n' '{"type":"agent_start"}'
-printf '%s\n' '{"type":"response","command":"get_available_models","success":true,"data":{"models":[{"id":"gpt-5.5","name":"GPT-5.5","provider":"openai-codex","reasoning":false}]}}';;
-esac
+printf '%s\n' '{"type":"response","command":"get_state","success":false,"error":"boom"}'
 sleep 30"#,
         );
-        let started = std::time::Instant::now();
-        let models = list_models(&program, &get_expanded_path()).unwrap();
-        assert!(started.elapsed() < std::time::Duration::from_secs(10));
-        assert_eq!(models.len(), 1);
-        assert_eq!(models[0].id, "gpt-5.5");
+        assert_eq!(
+            list_models(&program, &get_expanded_path()),
+            Err("pi could not list the models: boom".to_string())
+        );
     }
 
     #[cfg(unix)]
@@ -1525,12 +1720,20 @@ sleep 30"#,
     fn real_pi_lists_models_and_switches_model() {
         let path = search_path();
         let program = resolve_program(None, &path).expect("pi on PATH");
-        let models = list_models(&program, &path).unwrap();
-        println!("{} models", models.len());
+        let list = list_models(&program, &path).unwrap();
+        println!(
+            "default {:?} / {:?}, {} models:",
+            list.default_model,
+            list.default_thinking,
+            list.models.len()
+        );
+        for model in &list.models {
+            println!("  {} {:?}", model.key(), model.thinking_levels);
+        }
         let model = std::env::var("PI_TEST_MODEL").expect("PI_TEST_MODEL");
-        assert!(models
-            .iter()
-            .any(|m| format!("{}/{}", m.provider, m.id) == model));
+        assert!(list.models.iter().any(|m| m.key() == model));
+        let default_model = list.default_model.expect("a default model");
+        assert!(list.models.iter().any(|m| m.key() == default_model));
 
         let mut process = PiProcess::spawn(&program, &build_args(), &path).unwrap();
         let (sink, rx) = channel_sink();

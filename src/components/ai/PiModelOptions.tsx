@@ -1,9 +1,17 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { listPiModels, piModelKey, type PiModel } from "../../services/pi";
+import {
+  fitThinkingLevel,
+  listPiModels,
+  piModelKey,
+  PI_THINKING_LEVELS,
+  type PiModel,
+  type PiModelList,
+} from "../../services/pi";
+import type { Settings } from "../../types/note";
 
 export type PiModelsState =
   | { status: "loading" }
-  | { status: "ready"; models: PiModel[] }
+  | ({ status: "ready" } & PiModelList)
   | { status: "error"; message: string };
 
 /** The models of pi, and a function that loads them again after an error. */
@@ -14,7 +22,7 @@ export function usePiModels(): [PiModelsState, () => void] {
   useEffect(() => {
     let current = true;
     listPiModels()
-      .then((models) => current && setState({ status: "ready", models }))
+      .then((list) => current && setState({ status: "ready", ...list }))
       .catch(
         (err) => current && setState({ status: "error", message: String(err) }),
       );
@@ -31,26 +39,39 @@ export function usePiModels(): [PiModelsState, () => void] {
   return [state, retry];
 }
 
-/** The model of `value`, or undefined for the pi default or an unknown model. */
+/** The model of `value`, or undefined while the list is not ready. */
 export function findPiModel(
   state: PiModelsState,
   value: string,
 ): PiModel | undefined {
-  if (state.status !== "ready" || !value) return undefined;
+  if (state.status !== "ready") return undefined;
   return state.models.find((model) => piModelKey(model) === value);
 }
 
 /**
- * `<option>` elements for a model select: the pi default, then one group per
- * provider. A saved model that pi does not list stays selectable.
+ * The default model and thinking level of Scratch: the settings, else the
+ * start values of pi. The level fits the model.
  */
-export function PiModelOptions({
-  state,
-  value,
-}: {
-  state: PiModelsState;
-  value: string;
-}) {
+export function resolvePiDefaults(
+  list: PiModelList,
+  settings: Pick<Settings, "piModel" | "piThinking">,
+): { model: string; thinking: string } {
+  const byKey = (key?: string | null) =>
+    list.models.find((model) => piModelKey(model) === key);
+  const model =
+    byKey(settings.piModel) ?? byKey(list.defaultModel) ?? list.models[0];
+  const level = settings.piThinking || list.defaultThinking || "medium";
+  return {
+    model: model ? piModelKey(model) : "",
+    thinking: model ? fitThinkingLevel(level, model.thinkingLevels) : level,
+  };
+}
+
+/**
+ * `<option>` elements for a model select: one group per provider. While the
+ * list loads or after an error, one disabled placeholder option.
+ */
+export function PiModelOptions({ state }: { state: PiModelsState }) {
   const groups = useMemo(() => {
     const byProvider = new Map<string, PiModel[]>();
     if (state.status === "ready") {
@@ -63,12 +84,22 @@ export function PiModelOptions({
     return [...byProvider];
   }, [state]);
 
-  const unknown = value !== "" && !findPiModel(state, value);
+  if (groups.length === 0) {
+    const label =
+      state.status === "loading"
+        ? "Loading…"
+        : state.status === "error"
+          ? "Unavailable"
+          : "No models";
+    return (
+      <option value="" disabled>
+        {label}
+      </option>
+    );
+  }
 
   return (
     <>
-      <option value="">Default (pi)</option>
-      {unknown && <option value={value}>{value}</option>}
       {groups.map(([provider, models]) => (
         <optgroup key={provider} label={provider}>
           {models.map((model) => (
@@ -78,6 +109,21 @@ export function PiModelOptions({
           ))}
         </optgroup>
       ))}
+    </>
+  );
+}
+
+/** `<option>` elements for the thinking levels that a model supports. */
+export function PiThinkingOptions({ levels }: { levels: string[] }) {
+  return (
+    <>
+      {PI_THINKING_LEVELS.filter((level) => levels.includes(level.value)).map(
+        (level) => (
+          <option key={level.value} value={level.value}>
+            {level.label}
+          </option>
+        ),
+      )}
     </>
   );
 }

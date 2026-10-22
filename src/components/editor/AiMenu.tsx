@@ -32,6 +32,8 @@ import {
 import {
   findPiModel,
   PiModelOptions,
+  PiThinkingOptions,
+  resolvePiDefaults,
   usePiModels,
 } from "../ai/PiModelOptions";
 import type { Settings } from "../../types/note";
@@ -58,20 +60,7 @@ export type AiMenuMode = "selection" | "cursor";
 export type AiApplyAction = "replace" | "below" | "insert";
 export type AiContext = Pick<PiPromptRequest, "before" | "after" | "selection">;
 
-const ALL_THINKING_LEVELS = PI_THINKING_LEVELS.map((l) => l.value).filter(
-  Boolean,
-);
-
-/** Saves one AI setting, so that the next AI menus start with it. */
-function saveSetting(key: "piModel" | "piThinking", value: string) {
-  invoke<Settings>("get_settings")
-    .then((settings) =>
-      invoke("update_settings", {
-        newSettings: { ...settings, [key]: value || undefined },
-      }),
-    )
-    .catch((err) => console.error(`Failed to save ${key}:`, err));
-}
+const ALL_THINKING_LEVELS = PI_THINKING_LEVELS.map((l) => l.value);
 
 export interface AiMenuProps {
   mode: AiMenuMode;
@@ -141,7 +130,12 @@ export const AiMenu = memo(function AiMenu({
   const [tone, setTone] = useState("");
   const [thinking, setThinking] = useState("");
   const [model, setModel] = useState("");
-  const [settingsLoaded, setSettingsLoaded] = useState(false);
+  // The default model and thinking level are set (from the settings and pi).
+  const [defaultsSet, setDefaultsSet] = useState(false);
+  const [settings, setSettings] = useState<Pick<
+    Settings,
+    "piModel" | "piThinking"
+  > | null>(null);
   const [expanded, setExpanded] = useState(!initialRun);
   const [inputFocused, setInputFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -165,10 +159,12 @@ export const AiMenu = memo(function AiMenu({
   const busy = status === "streaming";
   const readOnly = !!lastRun?.readOnly;
   const hasResult = status === "done" && text.trim().length > 0;
-  // Without the model list (pi default, loading, error) pi fits the level.
+  // Without the model list (loading, error) pi fits the level.
   const supportedLevels =
     findPiModel(models, model)?.thinkingLevels ?? ALL_THINKING_LEVELS;
-  const effectiveThinking = fitThinkingLevel(thinking, supportedLevels);
+  const effectiveThinking = thinking
+    ? fitThinkingLevel(thinking, supportedLevels)
+    : "";
 
   // The suggestion list: the skills whose label contains the prompt.
   const groups = useMemo<ListGroup[]>(() => {
@@ -211,26 +207,27 @@ export const AiMenu = memo(function AiMenu({
     return () => cancelAnimationFrame(id);
   }, [initialRun]);
 
-  // Start with the model and thinking level from the settings.
   useEffect(() => {
     invoke<Settings>("get_settings")
-      .then((settings) => {
-        setModel(settings.piModel ?? "");
-        setThinking(settings.piThinking ?? "");
-      })
-      .catch((err) => console.error("Failed to load the AI settings:", err))
-      .finally(() => setSettingsLoaded(true));
+      .then(setSettings)
+      .catch((err) => {
+        console.error("Failed to load the AI settings:", err);
+        setSettings({});
+      });
   }, []);
 
-  const changeModel = useCallback((value: string) => {
-    setModel(value);
-    saveSetting("piModel", value);
-  }, []);
-
-  const changeThinking = useCallback((level: string) => {
-    setThinking(level);
-    saveSetting("piThinking", level);
-  }, []);
+  // Start with the default model and thinking level of Scratch. A change in
+  // the menu is only for this conversation: the settings do not change.
+  useEffect(() => {
+    if (defaultsSet || !settings || models.status === "loading") return;
+    const defaults =
+      models.status === "ready"
+        ? resolvePiDefaults(models, settings)
+        : { model: settings.piModel ?? "", thinking: settings.piThinking ?? "" };
+    setModel(defaults.model);
+    setThinking(defaults.thinking);
+    setDefaultsSet(true);
+  }, [defaultsSet, settings, models]);
 
   // Show the answer in the document (edits) or in the menu (read-only),
   // at most once per frame while it streams. The previous answer stays until
@@ -328,12 +325,12 @@ export const AiMenu = memo(function AiMenu({
     [sessionId, context, effectiveThinking, model, mode, onPreview],
   );
 
-  // A skill from the selection toolbar runs at once, with the saved settings.
+  // A skill from the selection toolbar runs at once, with the defaults.
   useEffect(() => {
-    if (!settingsLoaded || !initialRun || initialSentRef.current) return;
+    if (!defaultsSet || !initialRun || initialSentRef.current) return;
     initialSentRef.current = true;
     run(initialRun);
-  }, [settingsLoaded, initialRun, run]);
+  }, [defaultsSet, initialRun, run]);
 
   const withTone = useCallback(
     (aiRun: AiRun): AiRun =>
@@ -640,40 +637,36 @@ export const AiMenu = memo(function AiMenu({
                   <div className={SELECT_WRAPPER}>
                     <label htmlFor="ai-menu-model">Model</label>
                     <span aria-hidden="true" className="max-w-44 truncate text-text">
-                      {findPiModel(models, model)?.name || model || "Default (pi)"}
+                      {findPiModel(models, model)?.name ??
+                        (models.status === "loading" ? "Loading…" : model || "Unavailable")}
                     </span>
                     <select
                       id="ai-menu-model"
-                      value={model}
-                      onChange={(e) => changeModel(e.target.value)}
+                      value={findPiModel(models, model) ? model : ""}
+                      disabled={!findPiModel(models, model)}
+                      onChange={(e) => setModel(e.target.value)}
                       aria-describedby={
                         models.status === "error" ? "ai-menu-models-error" : undefined
                       }
                       className={SELECT}
                     >
-                      <PiModelOptions state={models} value={model} />
+                      <PiModelOptions state={models} />
                     </select>
                   </div>
                   <div className={SELECT_WRAPPER}>
                     <label htmlFor="ai-menu-thinking">Thinking</label>
                     <span aria-hidden="true" className="text-text">
                       {PI_THINKING_LEVELS.find((l) => l.value === effectiveThinking)
-                        ?.label ?? "Default"}
+                        ?.label ?? "…"}
                     </span>
                     <select
                       id="ai-menu-thinking"
                       value={effectiveThinking}
-                      onChange={(e) => changeThinking(e.target.value)}
+                      disabled={!findPiModel(models, model)}
+                      onChange={(e) => setThinking(e.target.value)}
                       className={SELECT}
                     >
-                      {PI_THINKING_LEVELS.filter(
-                        (level) =>
-                          !level.value || supportedLevels.includes(level.value),
-                      ).map((level) => (
-                        <option key={level.value} value={level.value}>
-                          {level.label}
-                        </option>
-                      ))}
+                      <PiThinkingOptions levels={supportedLevels} />
                     </select>
                   </div>
                   <div className="flex-1" />
