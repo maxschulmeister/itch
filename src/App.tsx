@@ -370,9 +370,11 @@ function AppContent() {
       }
 
       // Arrow keys for note navigation
-      // Skip if folder tree view is handling its own navigation
+      // Skip if folder tree view is handling its own navigation, and when a
+      // menu already used the key (for example the editor selection menu)
       const isInFolderTree = !!(e.target as HTMLElement).closest("[data-folder-tree]");
       if (
+        !e.defaultPrevented &&
         displayItems.length > 0 &&
         (e.key === "ArrowDown" || e.key === "ArrowUp") &&
         ((!isInEditor && !isInInput) || isEditorEmpty) &&
