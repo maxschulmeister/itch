@@ -36,6 +36,7 @@ const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "
 /// Prompt input from the editor. `before` and `after` are the document
 /// markdown on each side of the selection (or cursor).
 #[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct PromptRequest {
     pub instruction: String,
     pub before: String,
@@ -923,6 +924,23 @@ mod tests {
             model: None,
             read_only: false,
         }
+    }
+
+    #[test]
+    fn reads_the_request_that_the_editor_sends() {
+        let request: PromptRequest = serde_json::from_value(serde_json::json!({
+            "instruction": "Explain",
+            "before": "",
+            "after": "",
+            "selection": "text",
+            "thinking": "low",
+            "model": "anthropic/claude-haiku-5-5",
+            "readOnly": true,
+        }))
+        .unwrap();
+        assert!(request.read_only);
+        assert_eq!(request.thinking.as_deref(), Some("low"));
+        assert_eq!(request.model.as_deref(), Some("anthropic/claude-haiku-5-5"));
     }
 
     #[test]
