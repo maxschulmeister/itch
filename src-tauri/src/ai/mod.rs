@@ -4,6 +4,7 @@
 
 mod claude;
 mod codex;
+mod ollama;
 mod opencode;
 mod pi;
 pub(crate) mod process;
@@ -327,7 +328,7 @@ fn start(provider: Provider, program: &str, path: &str) -> Result<Box<dyn Conver
         Provider::Claude => claude::start(program, path),
         Provider::Codex => codex::start(program, path),
         Provider::OpenCode => Ok(Box::new(opencode::start(program, path)?)),
-        other => Err(format!("{} is not available yet.", other.name())),
+        Provider::Ollama => ollama::start(program, path),
     }
 }
 
@@ -338,7 +339,7 @@ fn list_models(provider: Provider, program: &str, path: &str) -> Result<ModelLis
         Provider::Claude => claude::list_models(program, path),
         Provider::Codex => codex::list_models(program, path),
         Provider::OpenCode => opencode::list_models(program, path),
-        other => Err(format!("{} is not available yet.", other.name())),
+        Provider::Ollama => ollama::list_models(program, path),
     }
 }
 
