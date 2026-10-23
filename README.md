@@ -13,7 +13,7 @@ A minimalist, offline-first markdown note-taking app for macOS, Windows, and Lin
 
 ## What is different from Scratch
 
-1. **AI formatting popover** - Select text or press `Cmd+J` to open an inline AI menu. It streams answers into the note and lets you choose the model and thinking level. It uses [pi](https://github.com/earendil-works/pi) in the background.
+1. **AI formatting popover** - Select text or press `Cmd+J` to open an inline AI menu. It streams answers into the note and lets you choose the model and thinking level. It uses an AI tool that you already have: [pi](https://github.com/earendil-works/pi), Claude Code, Codex, OpenCode, or Ollama. Itch runs the tool read-only: it cannot change your files and only returns text.
 2. **Optional library mode** - You do not have to pick a notes folder. Itch opens on a start screen, can open single `.md` files on their own, and can close the notes folder at any time.
 3. **No traces in your folders** - Itch does not create `.scratch/` folders or other files in your notes folders. All settings live in the app data directory.
 
@@ -30,8 +30,7 @@ A minimalist, offline-first markdown note-taking app for macOS, Windows, and Lin
 - **Wikilinks** - Type `[[` to link between notes with autocomplete
 - **Slash commands** - Type `/` to quickly insert headings, lists, code blocks, diagrams, and more
 - **Focus mode** - Distraction-free writing with animated sidebar/toolbar fade (`Cmd+Shift+Enter`)
-- **Inline AI menu** - Ask AI about a selection or a block and stream the answer into the note (via pi)
-- **Edit with Claude Code, OpenAI Codex, OpenCode, or Ollama** - Use your local CLI to edit notes with AI (including fully offline via Ollama)
+- **Inline AI menu** - Ask AI about a selection or a block (`Cmd+J`) and stream the answer into the note, with pi, Claude Code, Codex, OpenCode, or Ollama (fully offline)
 - **Works with other AI agents** - Detects external file changes
 - **Optional notes folder** - Use a notes folder as a library, or just open single files
 - **Folders** - Opt-in collapsible folder tree with drag-and-drop to organize notes
@@ -48,7 +47,7 @@ A minimalist, offline-first markdown note-taking app for macOS, Windows, and Lin
 
 Download the latest `.dmg` (macOS), `.exe` (Windows), or `.AppImage` / `.deb` (Linux) from [Releases](https://github.com/maxschulmeister/itch/releases).
 
-To use the inline AI menu, install [pi](https://github.com/earendil-works/pi) and sign in to a model provider. You can set the pi path, model, and thinking level in Settings → Tools.
+To use the inline AI menu, install [pi](https://github.com/earendil-works/pi), Claude Code, Codex, OpenCode, or Ollama and sign in to a model provider if the tool needs it. You can choose the tool, model, thinking level, and pi path in Settings → Tools.
 
 ### From Source
 

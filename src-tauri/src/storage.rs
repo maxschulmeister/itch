@@ -142,16 +142,23 @@ fn write_folder_settings(
     write_json(&folder_settings_path(app_data, canonical_folder), &file)
 }
 
-/// Moves the AI settings of older Itch versions (`piModel`, `piThinking`) to
-/// the per-tool maps. A value that is already in a map stays.
+/// Moves the AI settings of older Itch versions (`piModel`, `piThinking`,
+/// `ollamaModel`) to the per-tool maps. A value that is already in a map stays.
 fn migrate_ai_settings(settings: &mut Settings) {
-    for (old, map) in [
-        (settings.pi_model.take(), &mut settings.ai_models),
-        (settings.pi_thinking.take(), &mut settings.ai_thinking),
-    ] {
+    let old_values = [
+        (settings.pi_model.take(), "pi", false),
+        (settings.pi_thinking.take(), "pi", true),
+        (settings.ollama_model.take(), "ollama", false),
+    ];
+    for (old, provider, is_thinking) in old_values {
         if let Some(value) = old {
+            let map = if is_thinking {
+                &mut settings.ai_thinking
+            } else {
+                &mut settings.ai_models
+            };
             map.get_or_insert_with(Default::default)
-                .entry("pi".to_string())
+                .entry(provider.to_string())
                 .or_insert(value);
         }
     }
@@ -239,7 +246,7 @@ mod tests {
             interface_zoom: Some(1.1),
             custom_editor_width_px: Some(900),
             sidebar_width_px: Some(300),
-            ollama_model: Some("qwen3:8b".to_string()),
+            ollama_model: None,
             ai_provider: Some("pi".to_string()),
             ai_models: Some([("pi".to_string(), "anthropic/claude-sonnet-4-5".to_string())].into()),
             ai_thinking: Some([("pi".to_string(), "low".to_string())].into()),
@@ -272,7 +279,7 @@ mod tests {
         assert_eq!(FolderSettings::from_settings(&global), FolderSettings::default());
         assert_eq!(global.theme.mode, "dark");
         assert_eq!(global.sidebar_width_px, Some(300));
-        assert_eq!(global.ollama_model.as_deref(), Some("qwen3:8b"));
+        assert_eq!(global.ai_provider.as_deref(), Some("pi"));
     }
 
     #[test]
@@ -435,6 +442,7 @@ mod tests {
                 "theme": { "mode": "dark" },
                 "piModel": "openai-codex/gpt-5.5",
                 "piThinking": "low",
+                "ollamaModel": "qwen3:8b",
                 "aiModels": { "claude": "haiku" }
             }),
         )
@@ -444,6 +452,7 @@ mod tests {
         let models = loaded.ai_models.clone().unwrap();
         assert_eq!(models.get("pi").map(String::as_str), Some("openai-codex/gpt-5.5"));
         assert_eq!(models.get("claude").map(String::as_str), Some("haiku"));
+        assert_eq!(models.get("ollama").map(String::as_str), Some("qwen3:8b"));
         let thinking = loaded.ai_thinking.clone().unwrap();
         assert_eq!(thinking.get("pi").map(String::as_str), Some("low"));
 
@@ -451,7 +460,9 @@ mod tests {
         let stored: serde_json::Value = read_json(&global_settings_path(&app_data)).unwrap();
         assert!(stored.get("piModel").is_none());
         assert!(stored.get("piThinking").is_none());
+        assert!(stored.get("ollamaModel").is_none());
         assert_eq!(stored["aiModels"]["pi"], "openai-codex/gpt-5.5");
+        assert_eq!(stored["aiModels"]["ollama"], "qwen3:8b");
 
         std::fs::remove_dir_all(&root).unwrap();
     }
@@ -461,14 +472,14 @@ mod tests {
         let mut settings: Settings = serde_json::from_value(serde_json::json!({
             "theme": { "mode": "dark" },
             "piModel": "old/model",
-            "aiModels": { "pi": "new/model" }
+            "ollamaModel": "old:8b",
+            "aiModels": { "pi": "new/model", "ollama": "new:8b" }
         }))
         .unwrap();
         migrate_ai_settings(&mut settings);
-        assert_eq!(
-            settings.ai_models.unwrap().get("pi").map(String::as_str),
-            Some("new/model")
-        );
+        let models = settings.ai_models.unwrap();
+        assert_eq!(models.get("pi").map(String::as_str), Some("new/model"));
+        assert_eq!(models.get("ollama").map(String::as_str), Some("new:8b"));
         assert_eq!(settings.ai_thinking, None);
     }
 
