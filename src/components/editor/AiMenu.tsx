@@ -429,9 +429,9 @@ export const AiMenu = memo(function AiMenu({
         {!busy && (
           <div
             className={cn(
-              "flex gap-1.5 p-1.5 rounded-xl border bg-bg-elevated",
+              // Concentric with the card: 18px radius minus its 1px border.
+              "flex gap-1.5 p-1.5 rounded-[17px] border border-border bg-bg-elevated",
               expanded ? "flex-col" : "items-center",
-              expanded && inputFocused ? "border-ai" : "border-border",
             )}
           >
             <div

@@ -33,7 +33,7 @@ export const MENU_BUTTON = cn(
 /** The primary (AI) variant of `MENU_BUTTON`. */
 export const MENU_BUTTON_PRIMARY = cn(
   MENU_BUTTON,
-  "bg-ai text-white hover:bg-ai-hover hover:text-white",
+  "bg-ai text-text-inverse hover:bg-ai-hover hover:text-text-inverse",
   "disabled:bg-bg-muted disabled:text-text/40",
   "focus-visible:outline-offset-2",
 );

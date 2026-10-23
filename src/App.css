@@ -25,12 +25,14 @@
     0 16px 48px rgba(17, 24, 39, 0.04), 0 12px 24px rgba(17, 24, 39, 0.04),
     0 6px 8px rgba(17, 24, 39, 0.02), 0 2px 3px rgba(17, 24, 39, 0.02);
 
-  /* AI: buttons, focus border, the streaming text in the document */
-  --color-ai: #6229ff;
-  --color-ai-hover: #5400e5;
-  --color-ai-text: #5400e5;
-  --color-ai-dot-1: #7a52ff;
-  --color-ai-dot-3: #c3bdff;
+  /* AI: buttons and the "AI is writing" dots follow the accent color.
+     The streaming text uses the yellow of the selection color
+     (yellow-700 here for contrast on white, yellow-300 in dark mode). */
+  --color-ai: var(--color-accent);
+  --color-ai-hover: color-mix(in srgb, var(--color-accent) 85%, transparent);
+  --color-ai-text: #a16207;
+  --color-ai-dot-1: color-mix(in srgb, var(--color-accent) 60%, transparent);
+  --color-ai-dot-3: color-mix(in srgb, var(--color-accent) 30%, transparent);
 
   /* Editor font settings - simplified (overridden by ThemeContext) */
   --editor-font-family:
@@ -76,6 +78,7 @@
   --color-border: rgba(250, 249, 249, 0.07);
   --color-accent: #fafaf9;
   --color-selection: rgba(253, 224, 71, 0.35); /* Tailwind yellow-300 */
+  --color-ai-text: #fde047;
 
   --color-bg-elevated: rgb(33, 31, 30);
   --color-menu-fg: rgba(250, 249, 249, 0.64);
@@ -83,8 +86,6 @@
   --shadow-menu:
     0 16px 48px rgba(0, 0, 0, 0.5), 0 12px 24px rgba(0, 0, 0, 0.24),
     0 6px 8px rgba(0, 0, 0, 0.22), 0 2px 3px rgba(0, 0, 0, 0.12);
-
-  --color-ai-text: #7a52ff;
 
   /* Syntax highlighting colors - Dark (GitHub) */
   --color-syntax-keyword: #ea4a5a;
