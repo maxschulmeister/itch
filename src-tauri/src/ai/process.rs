@@ -74,6 +74,10 @@ impl JsonProcess {
         Ok(Self { child, writer })
     }
 
+    pub fn writer(&self) -> JsonWriter {
+        self.writer.clone()
+    }
+
     pub fn send(&self, value: &Value) -> std::io::Result<()> {
         self.writer.send(value)
     }

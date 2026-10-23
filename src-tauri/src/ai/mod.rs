@@ -3,8 +3,10 @@
 //! Events stream to the requesting webview through a Tauri `Channel`.
 
 mod claude;
+mod codex;
 mod pi;
 pub(crate) mod process;
+pub(crate) mod rpc;
 
 use crate::{check_cli_exists, get_expanded_path, AppState};
 use serde::{Deserialize, Serialize};
@@ -322,6 +324,7 @@ fn start(provider: Provider, program: &str, path: &str) -> Result<Box<dyn Conver
             path,
         )?)),
         Provider::Claude => claude::start(program, path),
+        Provider::Codex => codex::start(program, path),
         other => Err(format!("{} is not available yet.", other.name())),
     }
 }
@@ -331,6 +334,7 @@ fn list_models(provider: Provider, program: &str, path: &str) -> Result<ModelLis
     match provider {
         Provider::Pi => pi::list_models(program, path).map(ModelList::from),
         Provider::Claude => claude::list_models(program, path),
+        Provider::Codex => codex::list_models(program, path),
         other => Err(format!("{} is not available yet.", other.name())),
     }
 }
