@@ -16,12 +16,19 @@ import { mod } from "../../lib/platform";
 import * as cliService from "../../services/cli";
 import type { CliStatus } from "../../services/cli";
 import {
-  findPiModel,
-  PiModelOptions,
-  PiThinkingOptions,
-  resolvePiDefaults,
-  usePiModels,
-} from "../ai/PiModelOptions";
+  AiModelOptions,
+  AiThinkingOptions,
+  modelThinkingLevels,
+  resolveAiDefaults,
+  useAiModels,
+} from "../ai/AiModelOptions";
+import {
+  AI_PROVIDERS,
+  listAiProviders,
+  providerName,
+  resolveProvider,
+  type AiProvider as InlineAiProvider,
+} from "../../services/inlineAi";
 import type { Settings } from "../../types/note";
 
 type CliState = {
@@ -102,133 +109,191 @@ const AI_PROVIDER_INFO: Record<
   },
 };
 
-type PiSettingKey = "piModel" | "piThinking" | "piPath";
+/** Sets or removes the entry of `provider` in a per-tool settings map. */
+function withEntry(
+  map: Record<string, string> | undefined,
+  provider: InlineAiProvider,
+  value: string,
+): Record<string, string> | undefined {
+  const next = { ...map };
+  if (value) next[provider] = value;
+  else delete next[provider];
+  return Object.keys(next).length > 0 ? next : undefined;
+}
 
-function PiSettings() {
-  const [values, setValues] = useState<Record<PiSettingKey, string>>({
-    piModel: "",
-    piThinking: "",
-    piPath: "",
+function AiSettings() {
+  const [settings, setSettings] = useState<Settings | null>(null);
+  const [installed, setInstalled] = useState<InlineAiProvider[] | null>(null);
+  const [piPath, setPiPath] = useState("");
+  const provider =
+    settings && installed ? resolveProvider(settings.aiProvider, installed) : null;
+  const [models, retryModels] = useAiModels(provider);
+  const defaults = resolveAiDefaults(models, {
+    model: provider ? settings?.aiModels?.[provider] : undefined,
+    thinking: provider ? settings?.aiThinking?.[provider] : undefined,
   });
-  const [saved, setSaved] = useState(values);
-  const [models, retryModels] = usePiModels();
-  // Without a saved (or a known) value, the selects show the pi defaults.
-  const defaults =
-    models.status === "ready" ? resolvePiDefaults(models, values) : null;
-  const levels = defaults
-    ? (findPiModel(models, defaults.model)?.thinkingLevels ?? [])
-    : [];
+  const levels = modelThinkingLevels(models, defaults.model);
+
+  const findProviders = useCallback(() => {
+    listAiProviders()
+      .then(setInstalled)
+      .catch((error) => {
+        console.error("Failed to find the AI tools:", error);
+        setInstalled([]);
+      });
+  }, []);
 
   useEffect(() => {
     invoke<Settings>("get_settings")
-      .then((settings) => {
-        const loaded = {
-          piModel: settings.piModel ?? "",
-          piThinking: settings.piThinking ?? "",
-          piPath: settings.piPath ?? "",
-        };
-        setValues(loaded);
-        setSaved(loaded);
+      .then((loaded) => {
+        setSettings(loaded);
+        setPiPath(loaded.piPath ?? "");
       })
-      .catch((error) => console.error("Failed to load pi settings:", error));
-  }, []);
+      .catch((error) => console.error("Failed to load AI settings:", error));
+    findProviders();
+  }, [findProviders]);
 
   const save = useCallback(
-    async (key: PiSettingKey, rawValue = values[key]) => {
-      const value = rawValue.trim();
-      if (value === saved[key]) return;
+    async (change: (current: Settings) => Partial<Settings>) => {
       try {
-        const settings = await invoke<Settings>("get_settings");
-        await invoke("update_settings", {
-          newSettings: { ...settings, [key]: value || undefined },
-        });
-        setSaved((prev) => ({ ...prev, [key]: value }));
-        // Another pi can have other models.
-        if (key === "piPath") retryModels();
-        toast.success("pi settings saved");
+        const current = await invoke<Settings>("get_settings");
+        const next = { ...current, ...change(current) };
+        await invoke("update_settings", { newSettings: next });
+        setSettings(next);
+        toast.success("AI settings saved");
+        return true;
       } catch (error) {
-        console.error("Failed to save pi settings:", error);
-        toast.error("Unable to save pi settings");
+        console.error("Failed to save AI settings:", error);
+        toast.error("Unable to save AI settings");
+        return false;
       }
     },
-    [values, saved, retryModels],
+    [],
   );
+
+  const savePiPath = useCallback(async () => {
+    const value = piPath.trim();
+    if (value === (settings?.piPath ?? "")) return;
+    if (await save(() => ({ piPath: value || undefined }))) {
+      // Another pi can have other models, or pi can now be found.
+      findProviders();
+      if (provider === "pi") retryModels();
+    }
+  }, [piPath, settings, save, findProviders, provider, retryModels]);
 
   return (
     <div className="rounded-[10px] border border-border pl-4 py-3 pr-3 space-y-3">
       <div className="flex items-center justify-between gap-4">
-        <label htmlFor="pi-model" className="text-sm text-text font-medium">
-          Default model
+        <label htmlFor="ai-provider" className="text-sm text-text font-medium">
+          AI tool
         </label>
         <Select
-          id="pi-model"
-          value={defaults?.model ?? ""}
-          disabled={!defaults?.model}
-          onChange={(e) => {
-            const value = e.target.value;
-            setValues((v) => ({ ...v, piModel: value }));
-            save("piModel", value);
-          }}
-          aria-describedby={
-            models.status === "error" ? "pi-model-error" : undefined
-          }
+          id="ai-provider"
+          value={provider ?? ""}
+          disabled={!provider}
+          onChange={(e) => save(() => ({ aiProvider: e.target.value }))}
           className="w-64"
         >
-          <PiModelOptions state={models} />
-        </Select>
-      </div>
-      {models.status === "loading" && (
-        <p className="flex items-center justify-end gap-2 text-xs text-text-muted">
-          <SpinnerIcon className="w-3 h-3 animate-spin motion-reduce:animate-none" />
-          Loading models from pi
-        </p>
-      )}
-      {models.status === "error" && (
-        <div className="flex items-start justify-between gap-4 bg-red-500/10 rounded-md px-3 py-2">
-          <p id="pi-model-error" className="text-xs text-red-500 break-words">
-            {models.message}
-          </p>
-          <Button
-            type="button"
-            variant="outline"
-            size="xs"
-            onClick={retryModels}
-          >
-            Try again
-          </Button>
-        </div>
-      )}
-      <div className="flex items-center justify-between gap-4">
-        <label htmlFor="pi-thinking" className="text-sm text-text font-medium">
-          Default thinking
-        </label>
-        <Select
-          id="pi-thinking"
-          value={defaults?.thinking ?? ""}
-          disabled={levels.length === 0}
-          onChange={(e) => {
-            const value = e.target.value;
-            setValues((v) => ({ ...v, piThinking: value }));
-            save("piThinking", value);
-          }}
-          className="w-64"
-        >
-          {levels.length > 0 ? (
-            <PiThinkingOptions levels={levels} />
+          {installed === null ? (
+            <option value="">Loading…</option>
+          ) : installed.length === 0 ? (
+            <option value="">No AI tool found</option>
           ) : (
-            <PiModelOptions state={models} />
+            AI_PROVIDERS.filter((p) => installed.includes(p.id)).map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}
+              </option>
+            ))
           )}
         </Select>
       </div>
+      {installed?.length === 0 && (
+        <p className="text-xs text-text-muted">
+          Install pi, Claude Code, Codex, OpenCode or Ollama to use AI in the
+          editor.
+        </p>
+      )}
+      {provider && (
+        <>
+          <div className="flex items-center justify-between gap-4">
+            <label htmlFor="ai-model" className="text-sm text-text font-medium">
+              Default model
+            </label>
+            <Select
+              id="ai-model"
+              value={defaults.model}
+              onChange={(e) => {
+                const value = e.target.value;
+                save((current) => ({
+                  aiModels: withEntry(current.aiModels, provider, value),
+                }));
+              }}
+              aria-describedby={
+                models.status === "error" ? "ai-model-error" : undefined
+              }
+              className="w-64"
+            >
+              {defaults.model && models.status !== "ready" && (
+                <option value={defaults.model}>{defaults.model}</option>
+              )}
+              <AiModelOptions state={models} />
+            </Select>
+          </div>
+          {models.status === "loading" && (
+            <p className="flex items-center justify-end gap-2 text-xs text-text-muted">
+              <SpinnerIcon className="w-3 h-3 animate-spin motion-reduce:animate-none" />
+              Loading models from {providerName(provider)}
+            </p>
+          )}
+          {models.status === "error" && (
+            <div className="flex items-start justify-between gap-4 bg-red-500/10 rounded-md px-3 py-2">
+              <p id="ai-model-error" className="text-xs text-red-500 break-words">
+                {models.message}
+              </p>
+              <Button
+                type="button"
+                variant="outline"
+                size="xs"
+                onClick={retryModels}
+              >
+                Try again
+              </Button>
+            </div>
+          )}
+          {levels.length > 0 && (
+            <div className="flex items-center justify-between gap-4">
+              <label
+                htmlFor="ai-thinking"
+                className="text-sm text-text font-medium"
+              >
+                Default thinking
+              </label>
+              <Select
+                id="ai-thinking"
+                value={defaults.thinking}
+                onChange={(e) => {
+                  const value = e.target.value;
+                  save((current) => ({
+                    aiThinking: withEntry(current.aiThinking, provider, value),
+                  }));
+                }}
+                className="w-64"
+              >
+                <AiThinkingOptions levels={levels} />
+              </Select>
+            </div>
+          )}
+        </>
+      )}
       <div className="flex items-center justify-between gap-4">
         <label htmlFor="pi-path" className="text-sm text-text font-medium">
           pi path
         </label>
         <Input
           id="pi-path"
-          value={values.piPath}
-          onChange={(e) => setValues((v) => ({ ...v, piPath: e.target.value }))}
-          onBlur={() => save("piPath")}
+          value={piPath}
+          onChange={(e) => setPiPath(e.target.value)}
+          onBlur={savePiPath}
           placeholder="/usr/local/bin/pi"
           spellCheck={false}
           autoCapitalize="off"
@@ -237,10 +302,11 @@ function PiSettings() {
         />
       </div>
       <p className="text-xs text-text-muted">
-        Each new AI conversation starts with the default model and thinking
-        level. A change in the AI menu is only for that conversation. The list
-        shows the scoped models of pi (enabledModels). Lower thinking levels
-        give faster answers. Leave the path empty to find pi on your PATH.
+        The list shows only the AI tools that are installed. Each new AI
+        conversation starts with the default model and thinking level. A change
+        in the AI menu is only for that conversation. Default uses the setting
+        of the AI tool. Lower thinking levels give faster answers. Leave the pi
+        path empty to find pi on your PATH.
       </p>
     </div>
   );
@@ -358,14 +424,14 @@ export function ToolsSettingsSection() {
 
       <div className="border-t border-border border-dashed" />
 
-      {/* Inline AI (pi) */}
+      {/* Inline AI */}
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Ask AI</h2>
         <p className="text-sm text-text-muted mb-4">
-          Write and edit text with pi in the editor ({mod}J or the menu on
-          a selection)
+          Write and edit text with AI in the editor ({mod}J or the menu on a
+          selection)
         </p>
-        <PiSettings />
+        <AiSettings />
       </section>
 
       {/* CLI Tool (macOS only) */}

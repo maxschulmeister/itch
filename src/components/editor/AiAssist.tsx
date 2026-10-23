@@ -474,7 +474,7 @@ export function useAiAssist(editor: TiptapEditor | null) {
           extraSpace += Math.ceil(overflow - room);
           editor.view.dom.style.paddingBottom = `${basePadding + extraSpace}px`;
         }
-        // While pi writes, each change scrolls a small step: no animation.
+        // While the AI writes, each change scrolls a small step: no animation.
         const smooth = !streaming && !prefersReducedMotion();
         scroller.scrollTo({
           top: scroller.scrollTop + overflow,
@@ -547,7 +547,7 @@ export function useAiAssist(editor: TiptapEditor | null) {
 
   const openPopover = useCallback(() => open(), [open]);
 
-  // Close the AI menu (and stop pi) when the editor goes away.
+  // Close the AI menu (and stop the AI tool) when the editor goes away.
   useEffect(() => () => closePopover(false), [closePopover]);
 
   // Mod+J in the editor

@@ -187,7 +187,7 @@ const SLASH_COMMANDS: SlashCommandItem[] = [
   },
   {
     title: "Ask AI",
-    description: "Write with pi at the cursor",
+    description: "Write with AI at the cursor",
     icon: <SparklesIcon />,
     aliases: ["ai", "pi", "write", "continue", "draft"],
     command: (editor) => {

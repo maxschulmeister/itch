@@ -142,10 +142,28 @@ fn write_folder_settings(
     write_json(&folder_settings_path(app_data, canonical_folder), &file)
 }
 
+/// Moves the AI settings of older Itch versions (`piModel`, `piThinking`) to
+/// the per-tool maps. A value that is already in a map stays.
+fn migrate_ai_settings(settings: &mut Settings) {
+    for (old, map) in [
+        (settings.pi_model.take(), &mut settings.ai_models),
+        (settings.pi_thinking.take(), &mut settings.ai_thinking),
+    ] {
+        if let Some(value) = old {
+            map.get_or_insert_with(Default::default)
+                .entry("pi".to_string())
+                .or_insert(value);
+        }
+    }
+}
+
 /// Load the global settings merged with the settings of `folder` (if any).
 /// Imports a legacy `.scratch/settings.json` once, when a stored part is missing.
 pub fn load(app_data: &Path, folder: Option<&str>) -> Settings {
-    let global = read_json::<Settings>(&global_settings_path(app_data));
+    let global = read_json::<Settings>(&global_settings_path(app_data)).map(|mut settings| {
+        migrate_ai_settings(&mut settings);
+        settings
+    });
     let Some(folder) = folder else {
         return resolve(global, None, None).settings;
     };
@@ -159,7 +177,8 @@ pub fn load(app_data: &Path, folder: Option<&str>) -> Settings {
         None
     };
 
-    let resolved = resolve(global, stored_folder, legacy);
+    let mut resolved = resolve(global, stored_folder, legacy);
+    migrate_ai_settings(&mut resolved.settings);
     if resolved.write_global {
         if let Err(e) = write_json(&global_settings_path(app_data), &global_part(&resolved.settings)) {
             eprintln!("Failed to import legacy settings: {}", e);
@@ -221,8 +240,11 @@ mod tests {
             custom_editor_width_px: Some(900),
             sidebar_width_px: Some(300),
             ollama_model: Some("qwen3:8b".to_string()),
-            pi_model: Some("anthropic/claude-sonnet-4-5".to_string()),
-            pi_thinking: Some("low".to_string()),
+            ai_provider: Some("pi".to_string()),
+            ai_models: Some([("pi".to_string(), "anthropic/claude-sonnet-4-5".to_string())].into()),
+            ai_thinking: Some([("pi".to_string(), "low".to_string())].into()),
+            pi_model: None,
+            pi_thinking: None,
             pi_path: None,
             folders_enabled: Some(true),
             ignored_patterns: Some(vec!["node_modules".to_string()]),
@@ -401,6 +423,53 @@ mod tests {
         assert_eq!(recent.len(), MAX_RECENT_FILES);
         assert_eq!(recent[0], "/new.md");
         assert!(!recent.contains(&format!("/{}.md", MAX_RECENT_FILES - 1)));
+    }
+
+    #[test]
+    fn load_moves_old_pi_settings_to_the_ai_maps_once() {
+        let root = temp_root("ai-migrate");
+        let app_data = root.join("app");
+        write_json(
+            &global_settings_path(&app_data),
+            &serde_json::json!({
+                "theme": { "mode": "dark" },
+                "piModel": "openai-codex/gpt-5.5",
+                "piThinking": "low",
+                "aiModels": { "claude": "haiku" }
+            }),
+        )
+        .unwrap();
+
+        let loaded = load(&app_data, None);
+        let models = loaded.ai_models.clone().unwrap();
+        assert_eq!(models.get("pi").map(String::as_str), Some("openai-codex/gpt-5.5"));
+        assert_eq!(models.get("claude").map(String::as_str), Some("haiku"));
+        let thinking = loaded.ai_thinking.clone().unwrap();
+        assert_eq!(thinking.get("pi").map(String::as_str), Some("low"));
+
+        save(&app_data, None, &loaded).unwrap();
+        let stored: serde_json::Value = read_json(&global_settings_path(&app_data)).unwrap();
+        assert!(stored.get("piModel").is_none());
+        assert!(stored.get("piThinking").is_none());
+        assert_eq!(stored["aiModels"]["pi"], "openai-codex/gpt-5.5");
+
+        std::fs::remove_dir_all(&root).unwrap();
+    }
+
+    #[test]
+    fn migration_keeps_a_newer_ai_setting() {
+        let mut settings: Settings = serde_json::from_value(serde_json::json!({
+            "theme": { "mode": "dark" },
+            "piModel": "old/model",
+            "aiModels": { "pi": "new/model" }
+        }))
+        .unwrap();
+        migrate_ai_settings(&mut settings);
+        assert_eq!(
+            settings.ai_models.unwrap().get("pi").map(String::as_str),
+            Some("new/model")
+        );
+        assert_eq!(settings.ai_thinking, None);
     }
 
     #[test]

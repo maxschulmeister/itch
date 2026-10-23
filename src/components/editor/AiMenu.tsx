@@ -18,20 +18,25 @@ import {
   XIcon,
 } from "../icons";
 import {
-  abortPi,
-  closePiSession,
+  abortAi,
+  closeAiSession,
   fitThinkingLevel,
-  promptPi,
-  PI_THINKING_LEVELS,
-  type PiPromptRequest,
-} from "../../services/pi";
+  listAiProviders,
+  promptAi,
+  providerName,
+  resolveProvider,
+  thinkingLabel,
+  type AiPromptRequest,
+  type AiProvider,
+} from "../../services/inlineAi";
 import {
-  findPiModel,
-  PiModelOptions,
-  PiThinkingOptions,
-  resolvePiDefaults,
-  usePiModels,
-} from "../ai/PiModelOptions";
+  AiModelOptions,
+  AiThinkingOptions,
+  modelLabel,
+  modelThinkingLevels,
+  resolveAiDefaults,
+  useAiModels,
+} from "../ai/AiModelOptions";
 import type { Settings } from "../../types/note";
 import { cn } from "../../lib/utils";
 import type { AiRun } from "./AiAssist";
@@ -47,9 +52,16 @@ import {
 
 export type AiMenuMode = "selection" | "cursor";
 export type AiApplyAction = "replace" | "below" | "insert";
-export type AiContext = Pick<PiPromptRequest, "before" | "after" | "selection">;
+export type AiContext = Pick<AiPromptRequest, "before" | "after" | "selection">;
 
-const ALL_THINKING_LEVELS = PI_THINKING_LEVELS.map((l) => l.value);
+const NO_TOOL =
+  "No AI tool found. Install pi, Claude Code, Codex, OpenCode or Ollama, then open the AI menu again.";
+
+/** The AI tool of the menu and its saved defaults. */
+interface AiSetup {
+  provider: AiProvider | null;
+  saved: { model?: string; thinking?: string };
+}
 
 export interface AiMenuProps {
   mode: AiMenuMode;
@@ -64,7 +76,7 @@ export interface AiMenuProps {
   onClose: () => void;
   /** Called when the menu size changes, so the position can update. */
   onLayoutChange: () => void;
-  /** Called when pi starts or stops writing an answer. */
+  /** Called when the AI tool starts or stops writing an answer. */
   onStreamingChange: (streaming: boolean) => void;
 }
 
@@ -114,19 +126,17 @@ export const AiMenu = memo(function AiMenu({
   const [lastRun, setLastRun] = useState<AiRun | null>(null);
   const [thinking, setThinking] = useState("");
   const [model, setModel] = useState("");
-  // The default model and thinking level are set (from the settings and pi).
+  // The default model and thinking level are set (from the settings and the tool).
   const [defaultsSet, setDefaultsSet] = useState(false);
-  const [settings, setSettings] = useState<Pick<
-    Settings,
-    "piModel" | "piThinking"
-  > | null>(null);
+  const [setup, setSetup] = useState<AiSetup | null>(null);
   const [expanded, setExpanded] = useState(!initialRun);
   const [inputFocused, setInputFocused] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
   const [copyState, setCopyState] = useState<"idle" | "copied" | "failed">(
     "idle",
   );
-  const [models] = usePiModels();
+  const provider = setup?.provider ?? null;
+  const [models] = useAiModels(provider);
   const runIdRef = useRef(0);
   const initialSentRef = useRef(false);
   const rootRef = useRef<HTMLDivElement>(null);
@@ -136,12 +146,12 @@ export const AiMenu = memo(function AiMenu({
   const busy = status === "streaming";
   const readOnly = !!lastRun?.readOnly;
   const hasResult = status === "done" && text.trim().length > 0;
-  // Without the model list (loading, error) pi fits the level.
-  const supportedLevels =
-    findPiModel(models, model)?.thinkingLevels ?? ALL_THINKING_LEVELS;
-  const effectiveThinking = thinking
-    ? fitThinkingLevel(thinking, supportedLevels)
-    : "";
+  const supportedLevels = modelThinkingLevels(models, model);
+  // Without the model list (loading, error) the tool fits the level.
+  const effectiveThinking =
+    models.status === "ready"
+      ? fitThinkingLevel(thinking, supportedLevels)
+      : thinking;
 
   // At the cursor, a short list of skills whose label contains the prompt.
   // With a selection, the "Improve" dropdown has the skills.
@@ -155,12 +165,12 @@ export const AiMenu = memo(function AiMenu({
   const listOpen = expanded && inputFocused && !busy && skills.length > 0;
   const active = skills[Math.min(activeIndex, skills.length - 1)];
 
-  // One pi process per AI menu: stop it when the menu closes.
+  // One AI tool conversation per AI menu: stop it when the menu closes.
   useEffect(() => {
     return () => {
       runIdRef.current += 1;
-      closePiSession(sessionId).catch((err) =>
-        console.error("Failed to close pi session:", err),
+      closeAiSession(sessionId).catch((err) =>
+        console.error("Failed to close the AI session:", err),
       );
     };
   }, [sessionId]);
@@ -178,26 +188,48 @@ export const AiMenu = memo(function AiMenu({
   }, [initialRun]);
 
   useEffect(() => {
-    invoke<Settings>("get_settings")
-      .then(setSettings)
-      .catch((err) => {
+    let current = true;
+    Promise.all([
+      invoke<Settings>("get_settings").catch((err) => {
         console.error("Failed to load the AI settings:", err);
-        setSettings({});
+        return {} as Settings;
+      }),
+      listAiProviders().catch((err) => {
+        console.error("Failed to find the AI tools:", err);
+        return [];
+      }),
+    ]).then(([settings, installed]) => {
+      if (!current) return;
+      const provider = resolveProvider(settings.aiProvider, installed);
+      setSetup({
+        provider,
+        saved: provider
+          ? {
+              model: settings.aiModels?.[provider],
+              thinking: settings.aiThinking?.[provider],
+            }
+          : {},
       });
+    });
+    return () => {
+      current = false;
+    };
   }, []);
 
   // Start with the default model and thinking level of Itch. A change in
   // the menu is only for this conversation: the settings do not change.
   useEffect(() => {
-    if (defaultsSet || !settings || models.status === "loading") return;
-    const defaults =
-      models.status === "ready"
-        ? resolvePiDefaults(models, settings)
-        : { model: settings.piModel ?? "", thinking: settings.piThinking ?? "" };
+    if (defaultsSet || !setup) return;
+    if (setup.provider && models.status === "loading") return;
+    if (!setup.provider) {
+      setError(NO_TOOL);
+      setStatus("error");
+    }
+    const defaults = resolveAiDefaults(models, setup.saved);
     setModel(defaults.model);
     setThinking(defaults.thinking);
     setDefaultsSet(true);
-  }, [defaultsSet, settings, models]);
+  }, [defaultsSet, setup, models]);
 
   // Show the answer in the document (edits) or in the menu (read-only),
   // at most once per frame while it streams. The previous answer stays until
@@ -250,10 +282,16 @@ export const AiMenu = memo(function AiMenu({
       setPrompt("");
       setExpanded(false);
       setActiveIndex(0);
-      // The input goes away while pi writes: keep the focus in the menu.
+      // The input goes away while the tool writes: keep the focus in the menu.
       rootRef.current?.focus({ preventScroll: true });
       if (aiRun.readOnly) onPreview(null);
-      promptPi(
+      if (!provider) {
+        setError(NO_TOOL);
+        setStatus("error");
+        return;
+      }
+      promptAi(
+        provider,
         sessionId,
         {
           instruction: aiRun.instruction,
@@ -284,7 +322,7 @@ export const AiMenu = memo(function AiMenu({
         setStatus("error");
       });
     },
-    [sessionId, context, effectiveThinking, model, mode, onPreview],
+    [provider, sessionId, context, effectiveThinking, model, mode, onPreview],
   );
 
   // A skill from the selection toolbar runs at once, with the defaults.
@@ -309,8 +347,8 @@ export const AiMenu = memo(function AiMenu({
   );
 
   const stop = useCallback(() => {
-    abortPi(sessionId).catch((err) =>
-      console.error("Failed to stop pi:", err),
+    abortAi(sessionId).catch((err) =>
+      console.error("Failed to stop the AI tool:", err),
     );
     onClose();
   }, [sessionId, onClose]);
@@ -325,7 +363,7 @@ export const AiMenu = memo(function AiMenu({
       .finally(() => setTimeout(() => setCopyState("idle"), 1500));
   }, [text]);
 
-  // Esc stops pi while it writes, else it discards the answer.
+  // Esc stops the tool while it writes, else it discards the answer.
   useEscapeLayer(true, ESCAPE_LAYER.menu, busy ? stop : onClose);
 
   // Keep keys away from the global app and editor shortcuts.
@@ -422,7 +460,8 @@ export const AiMenu = memo(function AiMenu({
 
         {status === "done" && !text.trim() && (
           <p className="px-3.5 pt-3 pb-1 text-sm text-text-muted">
-            pi returned no text.
+            {provider ? providerName(provider) : "The AI tool"} returned no
+            text.
           </p>
         )}
 
@@ -486,38 +525,44 @@ export const AiMenu = memo(function AiMenu({
                   <div className={SELECT_WRAPPER}>
                     <label htmlFor="ai-menu-model">Model</label>
                     <span aria-hidden="true" className="max-w-44 truncate text-text">
-                      {findPiModel(models, model)?.name ??
-                        (models.status === "loading" ? "Loading…" : model || "Unavailable")}
+                      {provider && !model && models.status === "loading"
+                        ? "Loading…"
+                        : modelLabel(models, model)}
                     </span>
                     <select
                       id="ai-menu-model"
-                      value={findPiModel(models, model) ? model : ""}
-                      disabled={!findPiModel(models, model)}
+                      value={model}
+                      disabled={!provider}
                       onChange={(e) => setModel(e.target.value)}
                       aria-describedby={
                         models.status === "error" ? "ai-menu-models-error" : undefined
                       }
                       className={SELECT}
                     >
-                      <PiModelOptions state={models} />
+                      {model && models.status !== "ready" && (
+                        <option value={model}>{model}</option>
+                      )}
+                      <AiModelOptions state={models} />
                     </select>
                   </div>
-                  <div className={SELECT_WRAPPER}>
-                    <label htmlFor="ai-menu-thinking">Thinking</label>
-                    <span aria-hidden="true" className="text-text">
-                      {PI_THINKING_LEVELS.find((l) => l.value === effectiveThinking)
-                        ?.label ?? "…"}
-                    </span>
-                    <select
-                      id="ai-menu-thinking"
-                      value={effectiveThinking}
-                      disabled={!findPiModel(models, model)}
-                      onChange={(e) => setThinking(e.target.value)}
-                      className={SELECT}
-                    >
-                      <PiThinkingOptions levels={supportedLevels} />
-                    </select>
-                  </div>
+                  {supportedLevels.length > 0 && (
+                    <div className={SELECT_WRAPPER}>
+                      <label htmlFor="ai-menu-thinking">Thinking</label>
+                      <span aria-hidden="true" className="text-text">
+                        {effectiveThinking
+                          ? thinkingLabel(effectiveThinking)
+                          : "Default"}
+                      </span>
+                      <select
+                        id="ai-menu-thinking"
+                        value={effectiveThinking}
+                        onChange={(e) => setThinking(e.target.value)}
+                        className={SELECT}
+                      >
+                        <AiThinkingOptions levels={supportedLevels} />
+                      </select>
+                    </div>
+                  )}
                   <div className="flex-1" />
                 </>
               )}

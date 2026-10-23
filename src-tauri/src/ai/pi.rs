@@ -1,60 +1,25 @@
-//! Inline AI for the editor popover: one `pi --mode rpc` child process per
-//! popover conversation. Events stream to the requesting webview through a
-//! Tauri `Channel`.
+//! The pi backend: one `pi --mode rpc` child process per popover
+//! conversation.
 
-use crate::{check_cli_exists, get_expanded_path, no_window_cmd, AppState};
-use serde::{Deserialize, Serialize};
+use super::process::{exit_message, read_stderr_tail};
+use super::{
+    build_prompt, AiEvent, Conversation, Model, ModelList, PromptRequest, Sink, SYSTEM_PROMPT,
+};
+use crate::no_window_cmd;
+use serde::Serialize;
 use serde_json::Value;
-use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::{mpsc, Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::Duration;
-use tauri::ipc::Channel;
-use tauri::{AppHandle, Manager, State, Window};
 
-const SYSTEM_PROMPT: &str = "You are a writing assistant inside a markdown note editor. \
-Follow the user's instruction. Output only the resulting markdown, no preamble, \
-no code fences around the whole answer. Do not repeat the rest of the document.";
-
-/// Maximum characters of surrounding document sent as context.
-const CONTEXT_BUDGET_CHARS: usize = 24_000;
-const TRUNCATION_MARK: &str = "[…]";
-const SELECTION_START: &str = "⟦selection⟧";
-const SELECTION_END: &str = "⟦/selection⟧";
-const CURSOR: &str = "⟦cursor⟧";
-const NOT_FOUND: &str = "pi not found. Install pi or set its path in Settings.";
-const STDERR_TAIL_BYTES: usize = 4096;
 /// Time pi has to answer one command, for example `set_model`.
 const COMMAND_TIMEOUT: Duration = Duration::from_secs(15);
 /// Maximum number of `cycle_model` calls to read the scoped models.
 const MAX_SCOPED_MODELS: usize = 100;
 /// pi thinking levels, from lowest to highest.
 const THINKING_LEVELS: [&str; 7] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
-
-/// Prompt input from the editor. `before` and `after` are the document
-/// markdown on each side of the selection (or cursor).
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PromptRequest {
-    pub instruction: String,
-    pub before: String,
-    pub after: String,
-    /// Selected text as markdown. `None` in cursor mode.
-    pub selection: Option<String>,
-    /// Thinking level for this prompt. `None` keeps the current level.
-    #[serde(default)]
-    pub thinking: Option<String>,
-    /// Model as `provider/modelId` for this prompt. `None` keeps the current
-    /// model (the pi default for a new conversation).
-    #[serde(default)]
-    pub model: Option<String>,
-    /// The answer is for the user to read (for example an explanation). It
-    /// does not replace the selection.
-    #[serde(default)]
-    pub read_only: bool,
-}
 
 /// A model that pi can use, for the model select.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -141,15 +106,6 @@ fn parse_models(response: &Value) -> Result<Vec<PiModel>, String> {
     Ok(models.iter().filter_map(parse_model).collect())
 }
 
-/// Event sent to the frontend for one prompt run.
-#[derive(Debug, Clone, PartialEq, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum PiEvent {
-    Delta { text: String },
-    Done { text: String, aborted: bool },
-    Error { message: String },
-}
-
 /// The pi RPC records that matter for one prompt run.
 #[derive(Debug, PartialEq)]
 enum Record {
@@ -231,18 +187,18 @@ struct RunTracker {
 }
 
 impl RunTracker {
-    fn handle(&mut self, record: Record) -> Option<PiEvent> {
+    fn handle(&mut self, record: Record) -> Option<AiEvent> {
         match record {
-            Record::TextDelta(text) => Some(PiEvent::Delta { text }),
+            Record::TextDelta(text) => Some(AiEvent::Delta { text }),
             Record::AssistantEnd { text, error } => {
                 self.text = text;
                 self.error = error;
                 None
             }
-            Record::PromptRejected(message) => Some(PiEvent::Error { message }),
+            Record::PromptRejected(message) => Some(AiEvent::Error { message }),
             Record::Settled { aborted } => Some(match (aborted, self.error.take()) {
-                (false, Some(message)) => PiEvent::Error { message },
-                _ => PiEvent::Done {
+                (false, Some(message)) => AiEvent::Error { message },
+                _ => AiEvent::Done {
                     text: std::mem::take(&mut self.text),
                     aborted,
                 },
@@ -273,95 +229,6 @@ pub fn build_args() -> Vec<String> {
     .map(|arg| arg.to_string())
     .collect()
 }
-
-/// Keeps the text nearest to the selection: the end of `before` and the start
-/// of `after`. Budget that one side does not use goes to the other side.
-fn truncate_context(before: &str, after: &str, budget: usize) -> (String, String) {
-    let before_len = before.chars().count();
-    let after_len = after.chars().count();
-    if before_len + after_len <= budget {
-        return (before.to_string(), after.to_string());
-    }
-    let half = budget / 2;
-    let keep_after = after_len.min(budget - half.min(before_len));
-    let keep_before = before_len.min(budget - keep_after);
-
-    let before = if keep_before < before_len {
-        let tail: String = before.chars().skip(before_len - keep_before).collect();
-        format!("{TRUNCATION_MARK}\n{tail}")
-    } else {
-        before.to_string()
-    };
-    let after = if keep_after < after_len {
-        let head: String = after.chars().take(keep_after).collect();
-        format!("{head}\n{TRUNCATION_MARK}")
-    } else {
-        after.to_string()
-    };
-    (before, after)
-}
-
-/// The first prompt of a conversation carries the document as context.
-/// Follow-up prompts (refinements) send only the instruction.
-fn build_prompt(request: &PromptRequest, include_context: bool) -> String {
-    let instruction = request.instruction.trim();
-    if !include_context {
-        return instruction.to_string();
-    }
-    let (before, after) = truncate_context(&request.before, &request.after, CONTEXT_BUDGET_CHARS);
-    match &request.selection {
-        Some(selection) if request.read_only => format!(
-            "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
-             The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
-             <selection>\n{selection}\n</selection>\n\n\
-             Instruction: {instruction}\n\n\
-             Reply with markdown for the user to read. Do not rewrite the selected text."
-        ),
-        Some(selection) => format!(
-            "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
-             The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
-             <selection>\n{selection}\n</selection>\n\n\
-             Instruction: {instruction}\n\n\
-             Reply with only the markdown that replaces the selected text."
-        ),
-        None => format!(
-            "<document>\n{before}{CURSOR}{after}\n</document>\n\n\
-             The cursor position is marked with {CURSOR} in the document above.\n\n\
-             Instruction: {instruction}\n\n\
-             Reply with only the markdown to insert at the cursor."
-        ),
-    }
-}
-
-/// Returns the program to run: the path override from settings, or `pi`
-/// from the search path.
-fn resolve_program(path_override: Option<&str>, search_path: &str) -> Result<String, String> {
-    if let Some(path) = path_override.map(str::trim).filter(|p| !p.is_empty()) {
-        return if std::path::Path::new(path).is_file() {
-            Ok(path.to_string())
-        } else {
-            Err(format!(
-                "pi not found at {path}. Check the pi path in Settings."
-            ))
-        };
-    }
-    if check_cli_exists("pi", search_path)? {
-        Ok("pi".to_string())
-    } else {
-        Err(NOT_FOUND.to_string())
-    }
-}
-
-/// The expanded PATH, plus the default pi launcher folder.
-fn search_path() -> String {
-    let expanded = get_expanded_path();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => format!("{home}/.pi/agent/bin:{expanded}"),
-        _ => expanded,
-    }
-}
-
-type Sink = Box<dyn Fn(PiEvent) + Send>;
 
 struct ActiveRun {
     sink: Sink,
@@ -436,10 +303,8 @@ impl PiProcess {
     /// accepts the model, so that the prompt never runs with another model.
     pub fn prompt(&mut self, request: &PromptRequest, sink: Sink) -> Result<(), String> {
         let model = request
-            .model
-            .as_deref()
-            .map(str::trim)
-            .filter(|model| !model.is_empty() && self.model.as_deref() != Some(*model));
+            .model()
+            .filter(|model| self.model.as_deref() != Some(*model));
         let set_model = model
             .map(|model| {
                 split_model(model)
@@ -498,10 +363,8 @@ impl PiProcess {
         }
 
         let level = request
-            .thinking
-            .as_deref()
-            .map(str::trim)
-            .filter(|level| !level.is_empty() && self.thinking.as_deref() != Some(*level));
+            .thinking()
+            .filter(|level| self.thinking.as_deref() != Some(*level));
         let mut commands = Vec::with_capacity(2);
         if let Some(level) = level {
             commands.push(serde_json::json!({ "type": "set_thinking_level", "level": level }));
@@ -529,7 +392,7 @@ impl PiProcess {
         if let Ok(mut slot) = self.slot.lock() {
             slot.model_reply = None;
             if let Some(run) = slot.active.take() {
-                (run.sink)(PiEvent::Error { message });
+                (run.sink)(AiEvent::Error { message });
             }
         }
     }
@@ -594,7 +457,7 @@ fn read_stdout(
             continue;
         };
         if let Some(event) = run.tracker.handle(record) {
-            let finished = !matches!(event, PiEvent::Delta { .. });
+            let finished = !matches!(event, AiEvent::Delta { .. });
             (run.sink)(event);
             if finished {
                 slot.active = None;
@@ -603,10 +466,10 @@ fn read_stdout(
     }
 
     let stderr_tail = stderr_reader.join().unwrap_or_default();
-    let message = exit_message(&stderr_tail);
+    let message = exit_message("pi", &stderr_tail);
     if let Ok(mut slot) = slot.lock() {
         if let Some(run) = slot.active.take() {
-            (run.sink)(PiEvent::Error {
+            (run.sink)(AiEvent::Error {
                 message: message.clone(),
             });
         }
@@ -640,7 +503,7 @@ impl PiCommands {
                         .take()
                         .and_then(|reader| reader.join().ok())
                         .unwrap_or_default();
-                    return Err(exit_message(&stderr));
+                    return Err(exit_message("pi", &stderr));
                 }
             }
         }
@@ -681,7 +544,7 @@ fn scoped_models(
 
 /// Starts a short-lived pi and asks it for the models it can use: the scoped
 /// models, else all available models. pi resolves the scope patterns.
-fn list_models(program: &str, path_env: &str) -> Result<PiModelList, String> {
+pub fn list_models(program: &str, path_env: &str) -> Result<PiModelList, String> {
     let mut child = no_window_cmd(program)
         .args(build_args())
         .env("PATH", path_env)
@@ -738,210 +601,44 @@ fn read_model_list(pi: &mut PiCommands) -> Result<PiModelList, String> {
     })
 }
 
-fn read_stderr_tail(mut stderr: std::process::ChildStderr) -> String {
-    let mut tail: Vec<u8> = Vec::new();
-    let mut buffer = [0u8; 4096];
-    while let Ok(n) = stderr.read(&mut buffer) {
-        if n == 0 {
-            break;
+impl From<PiModelList> for ModelList {
+    fn from(list: PiModelList) -> Self {
+        ModelList {
+            models: list
+                .models
+                .into_iter()
+                .map(|model| Model {
+                    id: model.key(),
+                    name: model.name,
+                    group: model.provider,
+                    thinking_levels: model.thinking_levels,
+                })
+                .collect(),
+            default_model: list.default_model,
+            default_thinking: list.default_thinking,
         }
-        tail.extend_from_slice(&buffer[..n]);
-        if tail.len() > STDERR_TAIL_BYTES {
-            tail.drain(..tail.len() - STDERR_TAIL_BYTES);
-        }
-    }
-    String::from_utf8_lossy(&tail).into_owned()
-}
-
-fn exit_message(stderr_tail: &str) -> String {
-    match stderr_tail
-        .lines()
-        .rev()
-        .map(str::trim)
-        .find(|l| !l.is_empty())
-    {
-        Some(line) => format!("pi stopped unexpectedly: {line}"),
-        None => "pi stopped unexpectedly.".to_string(),
     }
 }
 
-struct Session {
-    window: String,
-    process: PiProcess,
-}
-
-/// The model list for one pi program, kept for the app session.
-#[derive(Default)]
-pub struct PiModels(Mutex<Option<(String, PiModelList)>>);
-
-/// Returns the models that pi can use, and the pi defaults. Asks pi once per
-/// app session.
-#[tauri::command]
-pub async fn pi_list_models(
-    app: AppHandle,
-    app_state: State<'_, AppState>,
-) -> Result<PiModelList, String> {
-    let path_override = app_state
-        .settings
-        .read()
-        .expect("settings read lock")
-        .pi_path
-        .clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        let path = search_path();
-        let program = resolve_program(path_override.as_deref(), &path)?;
-        let cache = app.state::<PiModels>();
-        // Hold the lock while pi answers, so that one pi starts at a time.
-        let mut cached = cache.0.lock().map_err(|_| "pi model list is broken.")?;
-        if let Some((cached_program, models)) = cached.as_ref() {
-            if *cached_program == program {
-                return Ok(models.clone());
-            }
-        }
-        let models = list_models(&program, &path)?;
-        *cached = Some((program, models.clone()));
-        Ok(models)
-    })
-    .await
-    .map_err(|e| format!("Failed to run pi: {e}"))?
-}
-
-/// Open popover conversations, by session id.
-#[derive(Default)]
-pub struct PiSessions(Mutex<HashMap<String, Session>>);
-
-/// Sends a prompt in the conversation `session_id`. Starts pi for the first
-/// prompt, or again when pi exited.
-#[tauri::command]
-pub async fn pi_prompt(
-    window: Window,
-    app_state: State<'_, AppState>,
-    session_id: String,
-    request: PromptRequest,
-    on_event: Channel<PiEvent>,
-) -> Result<(), String> {
-    let path_override = app_state
-        .settings
-        .read()
-        .expect("settings read lock")
-        .pi_path
-        .clone();
-    let app = window.app_handle().clone();
-    let label = window.label().to_string();
-
-    tauri::async_runtime::spawn_blocking(move || {
-        let sessions = app.state::<PiSessions>();
-        let mut map = sessions.0.lock().map_err(|_| "pi sessions are broken.")?;
-        let alive = map.get(&session_id).is_some_and(|s| s.process.is_alive());
-        if !alive {
-            // Drop a crashed process before a new one starts.
-            map.remove(&session_id);
-            let path = search_path();
-            let program = resolve_program(path_override.as_deref(), &path)?;
-            let process = PiProcess::spawn(&program, &build_args(), &path)?;
-            map.insert(
-                session_id.clone(),
-                Session {
-                    window: label,
-                    process,
-                },
-            );
-        }
-        let session = map.get_mut(&session_id).ok_or("pi session not found.")?;
-        session.process.prompt(
-            &request,
-            Box::new(move |event| {
-                let _ = on_event.send(event);
-            }),
-        )
-    })
-    .await
-    .map_err(|e| format!("Failed to run pi: {e}"))?
-}
-
-#[tauri::command]
-pub async fn pi_abort(sessions: State<'_, PiSessions>, session_id: String) -> Result<(), String> {
-    let mut map = sessions.0.lock().map_err(|_| "pi sessions are broken.")?;
-    match map.get_mut(&session_id) {
-        Some(session) => session.process.abort(),
-        None => Ok(()),
+impl Conversation for PiProcess {
+    fn prompt(&mut self, request: &PromptRequest, sink: Sink) -> Result<(), String> {
+        PiProcess::prompt(self, request, sink)
     }
-}
 
-#[tauri::command]
-pub async fn pi_close(sessions: State<'_, PiSessions>, session_id: String) -> Result<(), String> {
-    let removed = sessions
-        .0
-        .lock()
-        .map_err(|_| "pi sessions are broken.")?
-        .remove(&session_id);
-    drop(removed);
-    Ok(())
-}
+    fn abort(&mut self) -> Result<(), String> {
+        PiProcess::abort(self)
+    }
 
-/// Kills the pi processes of a closed window.
-pub fn close_window_sessions(app: &AppHandle, window_label: &str) {
-    let Some(sessions) = app.try_state::<PiSessions>() else {
-        return;
-    };
-    let removed: Vec<Session> = match sessions.0.lock() {
-        Ok(mut map) => {
-            let ids: Vec<String> = map
-                .iter()
-                .filter(|(_, s)| s.window == window_label)
-                .map(|(id, _)| id.clone())
-                .collect();
-            ids.iter().filter_map(|id| map.remove(id)).collect()
-        }
-        Err(_) => return,
-    };
-    drop(removed);
-}
-
-/// Kills all pi processes. Call when the app exits.
-pub fn close_all(app: &AppHandle) {
-    let Some(sessions) = app.try_state::<PiSessions>() else {
-        return;
-    };
-    let removed: Vec<Session> = match sessions.0.lock() {
-        Ok(mut map) => map.drain().map(|(_, s)| s).collect(),
-        Err(_) => return,
-    };
-    drop(removed);
+    fn is_alive(&self) -> bool {
+        PiProcess::is_alive(self)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn request(selection: Option<&str>) -> PromptRequest {
-        PromptRequest {
-            instruction: "Make it shorter".to_string(),
-            before: "# Title\n\nIntro ".to_string(),
-            after: " outro.\n".to_string(),
-            selection: selection.map(str::to_string),
-            thinking: None,
-            model: None,
-            read_only: false,
-        }
-    }
-
-    #[test]
-    fn reads_the_request_that_the_editor_sends() {
-        let request: PromptRequest = serde_json::from_value(serde_json::json!({
-            "instruction": "Explain",
-            "before": "",
-            "after": "",
-            "selection": "text",
-            "thinking": "low",
-            "model": "anthropic/claude-haiku-5-5",
-            "readOnly": true,
-        }))
-        .unwrap();
-        assert!(request.read_only);
-        assert_eq!(request.thinking.as_deref(), Some("low"));
-        assert_eq!(request.model.as_deref(), Some("anthropic/claude-haiku-5-5"));
-    }
+    use crate::ai::test_support::{channel_sink, collect_run, request};
+    use crate::get_expanded_path;
 
     #[test]
     fn splits_model_at_the_first_slash() {
@@ -1134,7 +831,7 @@ mod tests {
         let mut tracker = RunTracker::default();
         assert_eq!(
             tracker.handle(Record::TextDelta("Hi".to_string())),
-            Some(PiEvent::Delta {
+            Some(AiEvent::Delta {
                 text: "Hi".to_string()
             })
         );
@@ -1147,7 +844,7 @@ mod tests {
         );
         assert_eq!(
             tracker.handle(Record::Settled { aborted: false }),
-            Some(PiEvent::Done {
+            Some(AiEvent::Done {
                 text: "Hi there".to_string(),
                 aborted: false
             })
@@ -1164,7 +861,7 @@ mod tests {
         assert_eq!(tracker.handle(failed), None);
         assert_eq!(
             tracker.handle(Record::Settled { aborted: false }),
-            Some(PiEvent::Error {
+            Some(AiEvent::Error {
                 message: "overloaded".to_string()
             })
         );
@@ -1183,7 +880,7 @@ mod tests {
         });
         assert_eq!(
             tracker.handle(Record::Settled { aborted: false }),
-            Some(PiEvent::Done {
+            Some(AiEvent::Done {
                 text: "ok".to_string(),
                 aborted: false
             })
@@ -1199,7 +896,7 @@ mod tests {
         });
         assert_eq!(
             tracker.handle(Record::Settled { aborted: true }),
-            Some(PiEvent::Done {
+            Some(AiEvent::Done {
                 text: "partial".to_string(),
                 aborted: true
             })
@@ -1211,7 +908,7 @@ mod tests {
         let mut tracker = RunTracker::default();
         assert_eq!(
             tracker.handle(Record::PromptRejected("No API key".to_string())),
-            Some(PiEvent::Error {
+            Some(AiEvent::Error {
                 message: "No API key".to_string()
             })
         );
@@ -1240,129 +937,9 @@ mod tests {
         assert!(!args.iter().any(|a| a == "--model"));
     }
 
-    #[test]
-    fn context_is_unchanged_within_budget() {
-        assert_eq!(
-            truncate_context("abc", "def", 10),
-            ("abc".to_string(), "def".to_string())
-        );
-    }
-
-    #[test]
-    fn context_keeps_text_nearest_to_the_marker() {
-        let (before, after) = truncate_context("0123456789", "abcdefghij", 8);
-        assert_eq!(before, "[…]\n6789");
-        assert_eq!(after, "abcd\n[…]");
-    }
-
-    #[test]
-    fn context_gives_unused_budget_to_the_other_side() {
-        let (before, after) = truncate_context("0123456789", "ab", 8);
-        assert_eq!(before, "[…]\n456789");
-        assert_eq!(after, "ab");
-    }
-
-    #[test]
-    fn context_truncation_respects_char_boundaries() {
-        let (before, after) = truncate_context("ääääää", "üüüüüü", 4);
-        assert_eq!(before, "[…]\nää");
-        assert_eq!(after, "üü\n[…]");
-    }
-
-    #[test]
-    fn first_prompt_in_selection_mode_contains_marked_document() {
-        let prompt = build_prompt(&request(Some("**old** text")), true);
-        assert!(prompt.contains(
-            "<document>\n# Title\n\nIntro ⟦selection⟧**old** text⟦/selection⟧ outro.\n\n</document>"
-        ));
-        assert!(prompt.contains("<selection>\n**old** text\n</selection>"));
-        assert!(prompt.contains("Instruction: Make it shorter"));
-        assert!(prompt.contains("replaces the selected text"));
-    }
-
-    #[test]
-    fn first_prompt_in_cursor_mode_marks_cursor() {
-        let prompt = build_prompt(&request(None), true);
-        assert!(prompt.contains("<document>\n# Title\n\nIntro ⟦cursor⟧ outro.\n\n</document>"));
-        assert!(!prompt.contains("<selection>"));
-        assert!(prompt.contains("Instruction: Make it shorter"));
-        assert!(prompt.contains("insert at the cursor"));
-    }
-
-    #[test]
-    fn read_only_prompt_asks_for_an_answer_about_the_selection() {
-        let req = PromptRequest {
-            read_only: true,
-            ..request(Some("old text"))
-        };
-        let prompt = build_prompt(&req, true);
-        assert!(prompt.contains("<selection>\nold text\n</selection>"));
-        assert!(prompt.contains("Do not rewrite the selected text"));
-        assert!(!prompt.contains("replaces the selected text"));
-    }
-
-    #[test]
-    fn follow_up_prompt_is_only_the_instruction() {
-        assert_eq!(build_prompt(&request(Some("x")), false), "Make it shorter");
-    }
-
-    fn channel_sink() -> (Sink, std::sync::mpsc::Receiver<PiEvent>) {
-        let (tx, rx) = std::sync::mpsc::channel();
-        let tx = Mutex::new(tx);
-        let sink: Sink = Box::new(move |event| {
-            let _ = tx.lock().unwrap().send(event);
-        });
-        (sink, rx)
-    }
-
-    /// Collects events until the run ends.
-    fn collect_run(rx: &std::sync::mpsc::Receiver<PiEvent>) -> (String, PiEvent) {
-        let mut streamed = String::new();
-        loop {
-            let event = rx
-                .recv_timeout(std::time::Duration::from_secs(120))
-                .expect("run did not end");
-            match event {
-                PiEvent::Delta { text } => streamed.push_str(&text),
-                end => return (streamed, end),
-            }
-        }
-    }
-
     #[cfg(unix)]
-    fn fake_pi(script: &str) -> (tempfile_path::TempScript, String) {
-        let script_file = tempfile_path::TempScript::new(script);
-        let path = script_file.path.to_string_lossy().into_owned();
-        (script_file, path)
-    }
-
-    #[cfg(unix)]
-    mod tempfile_path {
-        use std::os::unix::fs::PermissionsExt;
-        use std::path::PathBuf;
-
-        pub struct TempScript {
-            pub path: PathBuf,
-        }
-
-        impl TempScript {
-            pub fn new(body: &str) -> Self {
-                static COUNTER: std::sync::atomic::AtomicUsize =
-                    std::sync::atomic::AtomicUsize::new(0);
-                let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                let path = std::env::temp_dir()
-                    .join(format!("itch-fake-pi-{}-{n}.sh", std::process::id()));
-                std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-                std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-                Self { path }
-            }
-        }
-
-        impl Drop for TempScript {
-            fn drop(&mut self) {
-                let _ = std::fs::remove_file(&self.path);
-            }
-        }
+    fn fake_pi(script: &str) -> (crate::ai::test_support::TempFile, String) {
+        crate::ai::test_support::fake_tool(script)
     }
 
     #[cfg(unix)]
@@ -1384,7 +961,7 @@ sleep 30"#,
         assert_eq!(streamed, "Hello");
         assert_eq!(
             end,
-            PiEvent::Done {
+            AiEvent::Done {
                 text: "Hello".to_string(),
                 aborted: false
             }
@@ -1427,7 +1004,7 @@ sleep 30"#,
     fn logging_fake_pi(
         log: &std::path::Path,
         set_model_reply: &str,
-    ) -> (tempfile_path::TempScript, String) {
+    ) -> (crate::ai::test_support::TempFile, String) {
         fake_pi(&format!(
             r#"while read line; do
 printf '%s\n' "$line" >> '{}'
@@ -1489,7 +1066,7 @@ done"#,
                 ..request(None)
             };
             process.prompt(&req, sink).unwrap();
-            assert!(matches!(collect_run(&rx).1, PiEvent::Done { .. }));
+            assert!(matches!(collect_run(&rx).1, AiEvent::Done { .. }));
         }
         assert_eq!(
             read_command_log(&log),
@@ -1528,7 +1105,7 @@ done"#,
             process.prompt(&req, sink).unwrap();
             assert_eq!(
                 collect_run(&rx).1,
-                PiEvent::Error {
+                AiEvent::Error {
                     message: "pi could not use the model nope/x: Model not found: nope/x"
                         .to_string()
                 }
@@ -1567,7 +1144,7 @@ done"#,
     /// returns the next line of `cycle` (shell `case` arms for `$n`, the
     /// 1-based call count). `get_available_models` returns one model.
     #[cfg(unix)]
-    fn model_list_fake_pi(state_model: &str, cycle: &str) -> (tempfile_path::TempScript, String) {
+    fn model_list_fake_pi(state_model: &str, cycle: &str) -> (crate::ai::test_support::TempFile, String) {
         fake_pi(&format!(
             r#"n=0
 while read line; do
@@ -1706,7 +1283,7 @@ sleep 30"#,
             ),
             Ok(()) => assert_eq!(
                 collect_run(&rx).1,
-                PiEvent::Error {
+                AiEvent::Error {
                     message: expected.to_string()
                 }
             ),
@@ -1736,8 +1313,9 @@ sleep 30"#,
     #[test]
     #[ignore = "needs a real pi install and model credentials"]
     fn real_pi_lists_models_and_switches_model() {
-        let path = search_path();
-        let program = resolve_program(None, &path).expect("pi on PATH");
+        let path = crate::ai::search_path();
+        let program = crate::ai::resolve_program(crate::ai::Provider::Pi, None, &path)
+            .expect("pi on PATH");
         let list = list_models(&program, &path).unwrap();
         println!(
             "default {:?} / {:?}, {} models:",
@@ -1762,7 +1340,7 @@ sleep 30"#,
         process.prompt(&missing, sink).unwrap();
         let (_, end) = collect_run(&rx);
         println!("missing model: {end:?}");
-        assert!(matches!(end, PiEvent::Error { .. }));
+        assert!(matches!(end, AiEvent::Error { .. }));
 
         let (sink, rx) = channel_sink();
         let req = PromptRequest {
@@ -1773,7 +1351,7 @@ sleep 30"#,
         process.prompt(&req, sink).unwrap();
         let (streamed, end) = collect_run(&rx);
         println!("model: {streamed:?} / {end:?}");
-        assert!(matches!(end, PiEvent::Done { aborted: false, .. }));
+        assert!(matches!(end, AiEvent::Done { aborted: false, .. }));
     }
 
     /// End-to-end check with the real pi and its default model.
@@ -1781,8 +1359,9 @@ sleep 30"#,
     #[test]
     #[ignore = "needs a real pi install and model credentials"]
     fn real_pi_streams_refines_and_aborts() {
-        let path = search_path();
-        let program = resolve_program(None, &path).expect("pi on PATH");
+        let path = crate::ai::search_path();
+        let program = crate::ai::resolve_program(crate::ai::Provider::Pi, None, &path)
+            .expect("pi on PATH");
         let mut process = PiProcess::spawn(&program, &build_args(), &path).unwrap();
 
         let (sink, rx) = channel_sink();
@@ -1800,7 +1379,7 @@ sleep 30"#,
         let (streamed, end) = collect_run(&rx);
         println!("first: {streamed:?} / {end:?}");
         assert!(!streamed.is_empty());
-        assert!(matches!(end, PiEvent::Done { aborted: false, .. }));
+        assert!(matches!(end, AiEvent::Done { aborted: false, .. }));
 
         let (sink, rx) = channel_sink();
         let refine = PromptRequest {
@@ -1810,7 +1389,7 @@ sleep 30"#,
         process.prompt(&refine, sink).unwrap();
         let (streamed, end) = collect_run(&rx);
         println!("refine: {streamed:?} / {end:?}");
-        assert!(matches!(end, PiEvent::Done { aborted: false, .. }));
+        assert!(matches!(end, AiEvent::Done { aborted: false, .. }));
 
         let (sink, rx) = channel_sink();
         let long = PromptRequest {
@@ -1822,11 +1401,11 @@ sleep 30"#,
         let first_delta = rx
             .recv_timeout(std::time::Duration::from_secs(120))
             .expect("no delta");
-        assert!(matches!(first_delta, PiEvent::Delta { .. }));
+        assert!(matches!(first_delta, AiEvent::Delta { .. }));
         process.abort().unwrap();
         let (_, end) = collect_run(&rx);
         println!("abort: {end:?}");
-        assert!(matches!(end, PiEvent::Done { aborted: true, .. }));
+        assert!(matches!(end, AiEvent::Done { aborted: true, .. }));
         assert!(process.is_alive());
     }
 }

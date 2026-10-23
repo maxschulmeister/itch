@@ -57,8 +57,12 @@ export interface Settings {
   defaultNoteName?: string;
   interfaceZoom?: number;
   ollamaModel?: string;
-  piModel?: string;
-  piThinking?: string;
+  /** AI tool of the inline AI menu. Unset: the first installed tool. */
+  aiProvider?: string;
+  /** Default model of each AI tool, by provider. Unset: the tool default. */
+  aiModels?: Record<string, string>;
+  /** Default thinking level of each AI tool, by provider. */
+  aiThinking?: Record<string, string>;
   piPath?: string;
   ignoredPatterns?: string[];
   customColorsLight?: CustomColors;

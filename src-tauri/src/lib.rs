@@ -17,7 +17,7 @@ use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
 mod git;
-mod pi;
+mod ai;
 mod storage;
 
 // Note metadata for list display
@@ -139,11 +139,20 @@ pub struct Settings {
     pub sidebar_width_px: Option<u32>,
     #[serde(rename = "ollamaModel")]
     pub ollama_model: Option<String>,
-    /// Model for the inline AI popover as `provider/modelId`; `None` uses pi's default.
-    #[serde(rename = "piModel")]
+    /// AI tool for the inline AI menu (`ai::Provider`); `None` uses the first installed tool.
+    #[serde(rename = "aiProvider")]
+    pub ai_provider: Option<String>,
+    /// Default model of each AI tool, by provider; a missing entry uses the tool default.
+    #[serde(rename = "aiModels")]
+    pub ai_models: Option<std::collections::HashMap<String, String>>,
+    /// Default thinking level of each AI tool, by provider; a missing entry uses the tool default.
+    #[serde(rename = "aiThinking")]
+    pub ai_thinking: Option<std::collections::HashMap<String, String>>,
+    /// Older pi model setting. Read once and moved to `ai_models`.
+    #[serde(rename = "piModel", skip_serializing)]
     pub pi_model: Option<String>,
-    /// Thinking level for the inline AI popover (`pi --thinking`); `None` uses pi's default.
-    #[serde(rename = "piThinking")]
+    /// Older pi thinking setting. Read once and moved to `ai_thinking`.
+    #[serde(rename = "piThinking", skip_serializing)]
     pub pi_thinking: Option<String>,
     /// Path to the pi executable; `None` searches the PATH.
     #[serde(rename = "piPath")]
@@ -3828,8 +3837,8 @@ pub fn run() {
                 debounce_map: Arc::new(Mutex::new(HashMap::new())),
             };
             app.manage(state);
-            app.manage(pi::PiSessions::default());
-            app.manage(pi::PiModels::default());
+            app.manage(ai::AiSessions::default());
+            app.manage(ai::AiModels::default());
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
@@ -3864,7 +3873,7 @@ pub fn run() {
         })
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
-                pi::close_window_sessions(window.app_handle(), window.label());
+                ai::close_window_sessions(window.app_handle(), window.label());
             }
             // Handle drag-and-drop of .md files onto any window
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -3939,10 +3948,11 @@ pub fn run() {
             ai_execute_codex,
             ai_execute_opencode,
             ai_execute_ollama,
-            pi::pi_prompt,
-            pi::pi_list_models,
-            pi::pi_abort,
-            pi::pi_close,
+            ai::ai_providers,
+            ai::ai_list_models,
+            ai::ai_prompt,
+            ai::ai_abort,
+            ai::ai_close,
             read_file_direct,
             save_file_direct,
             import_file_to_folder,
@@ -3961,7 +3971,7 @@ pub fn run() {
     // RunEvent::Opened and RunEvent::Reopen are macOS-only in Tauri v2.
     app.run(|_app_handle, _event| {
         if let tauri::RunEvent::Exit = _event {
-            pi::close_all(_app_handle);
+            ai::close_all(_app_handle);
         }
         #[cfg(target_os = "macos")]
         match _event {
