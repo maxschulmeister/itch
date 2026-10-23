@@ -55,6 +55,10 @@ impl TempFile {
         let _ = std::fs::remove_file(&path);
         Self { path }
     }
+
+    pub fn read(&self) -> String {
+        std::fs::read_to_string(&self.path).unwrap_or_default()
+    }
 }
 
 impl Drop for TempFile {
@@ -72,4 +76,14 @@ pub fn fake_tool(body: &str) -> (TempFile, String) {
     std::fs::set_permissions(&file.path, std::fs::Permissions::from_mode(0o755)).unwrap();
     let path = file.path.to_string_lossy().into_owned();
     (file, path)
+}
+
+/// True while the process `pid` runs.
+#[cfg(unix)]
+pub fn is_running(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .unwrap()
+        .success()
 }

@@ -2,6 +2,7 @@
 //! backend behind the `Conversation` trait. One conversation per popover.
 //! Events stream to the requesting webview through a Tauri `Channel`.
 
+mod claude;
 mod pi;
 pub(crate) mod process;
 
@@ -120,6 +121,56 @@ pub enum AiEvent {
 
 /// Receives the events of one run.
 pub type Sink = Box<dyn Fn(AiEvent) + Send>;
+
+/// The current run of a conversation. A backend shares it with the thread
+/// that reads the tool output.
+#[derive(Default)]
+pub struct Run {
+    sink: Option<Sink>,
+    text: String,
+}
+
+impl Run {
+    pub fn is_active(&self) -> bool {
+        self.sink.is_some()
+    }
+
+    /// Starts a run. Fails while the previous run of `tool` is active.
+    pub fn start(&mut self, tool: &str, sink: Sink) -> Result<(), String> {
+        if self.is_active() {
+            return Err(format!("{tool} is still working on the previous request."));
+        }
+        self.sink = Some(sink);
+        self.text.clear();
+        Ok(())
+    }
+
+    /// Streams `text`. Does nothing without an active run.
+    pub fn delta(&mut self, text: &str) {
+        if let Some(sink) = &self.sink {
+            self.text.push_str(text);
+            sink(AiEvent::Delta {
+                text: text.to_string(),
+            });
+        }
+    }
+
+    /// Ends the run with `Done`. `text` is the final answer; `None` keeps
+    /// the streamed text.
+    pub fn finish(&mut self, text: Option<String>, aborted: bool) {
+        if let Some(sink) = self.sink.take() {
+            let text = text.unwrap_or_else(|| std::mem::take(&mut self.text));
+            sink(AiEvent::Done { text, aborted });
+        }
+    }
+
+    /// Ends the run with `Error`.
+    pub fn fail(&mut self, message: String) {
+        if let Some(sink) = self.sink.take() {
+            sink(AiEvent::Error { message });
+        }
+    }
+}
 
 /// A model for the model selects.
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -270,6 +321,7 @@ fn start(provider: Provider, program: &str, path: &str) -> Result<Box<dyn Conver
             &pi::build_args(),
             path,
         )?)),
+        Provider::Claude => claude::start(program, path),
         other => Err(format!("{} is not available yet.", other.name())),
     }
 }
@@ -278,6 +330,7 @@ fn start(provider: Provider, program: &str, path: &str) -> Result<Box<dyn Conver
 fn list_models(provider: Provider, program: &str, path: &str) -> Result<ModelList, String> {
     match provider {
         Provider::Pi => pi::list_models(program, path).map(ModelList::from),
+        Provider::Claude => claude::list_models(program, path),
         other => Err(format!("{} is not available yet.", other.name())),
     }
 }
@@ -471,6 +524,50 @@ mod tests {
         assert!(request.read_only);
         assert_eq!(request.thinking(), Some("low"));
         assert_eq!(request.model(), Some("anthropic/claude-haiku-5-5"));
+    }
+
+    #[test]
+    fn run_streams_and_finishes_once() {
+        let (sink, rx) = test_support::channel_sink();
+        let mut run = Run::default();
+        run.start("tool", sink).unwrap();
+        let (other, _) = test_support::channel_sink();
+        assert_eq!(
+            run.start("tool", other),
+            Err("tool is still working on the previous request.".to_string())
+        );
+        run.delta("Hel");
+        run.delta("lo");
+        run.finish(None, false);
+        run.fail("late".to_string());
+        assert_eq!(
+            test_support::collect_run(&rx),
+            (
+                "Hello".to_string(),
+                AiEvent::Done {
+                    text: "Hello".to_string(),
+                    aborted: false
+                }
+            )
+        );
+        assert!(rx.try_recv().is_err());
+        assert!(!run.is_active());
+    }
+
+    #[test]
+    fn run_final_text_replaces_the_streamed_text() {
+        let (sink, rx) = test_support::channel_sink();
+        let mut run = Run::default();
+        run.start("tool", sink).unwrap();
+        run.delta("draft");
+        run.finish(Some("final".to_string()), true);
+        assert_eq!(
+            test_support::collect_run(&rx).1,
+            AiEvent::Done {
+                text: "final".to_string(),
+                aborted: true
+            }
+        );
     }
 
     #[test]
