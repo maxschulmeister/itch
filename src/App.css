@@ -714,6 +714,12 @@ html.dark {
 .ProseMirror .ai-insertion * {
   color: var(--color-ai-text);
 }
+/* The preview is a widget (contenteditable=false), which Tiptap sets to
+   white-space: normal. Keep the line breaks in the text, as the editor does. */
+.ProseMirror [contenteditable="false"].ai-insertion {
+  white-space: pre-wrap;
+  white-space: break-spaces;
+}
 div.ai-insertion > :last-child {
   margin-bottom: 0;
 }

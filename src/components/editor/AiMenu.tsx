@@ -383,7 +383,7 @@ export const AiMenu = memo(function AiMenu({
             <div
               ref={answerRef}
               aria-busy={busy}
-              className="prose dark:prose-invert max-w-none text-sm [&_a]:pointer-events-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
+              className="prose dark:prose-invert max-w-none text-sm whitespace-break-spaces [&_a]:pointer-events-none [&>*:first-child]:mt-0 [&>*:last-child]:mb-0"
             />
           </div>
         )}
