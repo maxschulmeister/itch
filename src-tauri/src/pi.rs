@@ -1333,7 +1333,7 @@ mod tests {
                     std::sync::atomic::AtomicUsize::new(0);
                 let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 let path = std::env::temp_dir()
-                    .join(format!("scratch-fake-pi-{}-{n}.sh", std::process::id()));
+                    .join(format!("itch-fake-pi-{}-{n}.sh", std::process::id()));
                 std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
                 std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
                 Self { path }
@@ -1377,7 +1377,7 @@ sleep 30"#,
     #[cfg(unix)]
     #[test]
     fn process_sets_thinking_level_before_prompt_when_it_changes() {
-        let log = std::env::temp_dir().join(format!("scratch-fake-pi-log-{}", std::process::id()));
+        let log = std::env::temp_dir().join(format!("itch-fake-pi-log-{}", std::process::id()));
         let _ = std::fs::remove_file(&log);
         let (_script, program) = logging_fake_pi(&log, "");
         let mut process = PiProcess::spawn(&program, &[], &get_expanded_path()).unwrap();
@@ -1451,7 +1451,7 @@ done"#,
     #[test]
     fn process_sets_model_before_thinking_and_prompt_when_it_changes() {
         let log =
-            std::env::temp_dir().join(format!("scratch-fake-pi-model-{}", std::process::id()));
+            std::env::temp_dir().join(format!("itch-fake-pi-model-{}", std::process::id()));
         let _ = std::fs::remove_file(&log);
         let (_script, program) = logging_fake_pi(
             &log,
@@ -1493,7 +1493,7 @@ done"#,
     #[test]
     fn process_ends_run_with_error_when_set_model_fails() {
         let log =
-            std::env::temp_dir().join(format!("scratch-fake-pi-badmodel-{}", std::process::id()));
+            std::env::temp_dir().join(format!("itch-fake-pi-badmodel-{}", std::process::id()));
         let _ = std::fs::remove_file(&log);
         let (_script, program) = logging_fake_pi(
             &log,

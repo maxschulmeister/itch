@@ -186,7 +186,7 @@ export const AiMenu = memo(function AiMenu({
       });
   }, []);
 
-  // Start with the default model and thinking level of Scratch. A change in
+  // Start with the default model and thinking level of Itch. A change in
   // the menu is only for this conversation: the settings do not change.
   useEffect(() => {
     if (defaultsSet || !settings || models.status === "loading") return;

@@ -24,10 +24,6 @@ import { AiEditModal } from "./components/ai/AiEditModal";
 import { AiResponseToast } from "./components/ai/AiResponseToast";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
-import {
-  check as checkForUpdate,
-  type Update,
-} from "@tauri-apps/plugin-updater";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as aiService from "./services/ai";
 import * as filesService from "./services/files";
@@ -80,7 +76,7 @@ function AppContent() {
   const [aiProvider, setAiProvider] = useState<AiProvider>("claude");
   const editorRef = useRef<TiptapEditor | null>(null);
 
-  // Listen for set-notes-folder event from CLI (scratch .)
+  // Listen for set-notes-folder event from CLI (itch .)
   // Placed here in AppContent where both NotesContext and ThemeContext are available
   useEffect(() => {
     let cancelled = false;
@@ -464,7 +460,7 @@ function AppContent() {
       <div className="h-full min-h-0 flex items-center justify-center bg-bg-secondary">
         <div className="text-text-muted/70 text-sm flex items-center gap-1.5 font-medium">
           <SpinnerIcon className="w-4.5 h-4.5 stroke-[1.5] animate-spin" />
-          Initializing Scratch...
+          Initializing Itch...
         </div>
       </div>
     );
@@ -571,82 +567,6 @@ function AppContent() {
   );
 }
 
-// Shared update check — used by startup and manual "Check for Updates"
-async function showUpdateToast(): Promise<"update" | "no-update" | "error"> {
-  try {
-    const update = await checkForUpdate();
-    if (update) {
-      toast(<UpdateToast update={update} toastId="update-toast" />, {
-        id: "update-toast",
-        duration: Infinity,
-        closeButton: true,
-      });
-      return "update";
-    }
-    return "no-update";
-  } catch (err) {
-    // Network errors and 404s (no release published yet) are not real failures
-    const msg = String(err);
-    if (
-      msg.includes("404") ||
-      msg.includes("network") ||
-      msg.includes("Could not fetch")
-    ) {
-      return "no-update";
-    }
-    console.error("Update check failed:", err);
-    return "error";
-  }
-}
-
-export { showUpdateToast };
-
-function UpdateToast({
-  update,
-  toastId,
-}: {
-  update: Update;
-  toastId: string | number;
-}) {
-  const [installing, setInstalling] = useState(false);
-
-  const handleUpdate = async () => {
-    setInstalling(true);
-    try {
-      await update.downloadAndInstall();
-      toast.dismiss(toastId);
-      toast.success("Update installed! Restart Scratch to apply.", {
-        duration: Infinity,
-        closeButton: true,
-      });
-    } catch (err) {
-      console.error("Update failed:", err);
-      toast.error("Update failed. Please try again later.");
-      setInstalling(false);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-1">
-      <div className="font-medium text-sm">
-        Update Available: v{update.version}
-      </div>
-      {update.body && (
-        <div className="text-xs text-text-muted line-clamp-3">
-          {update.body}
-        </div>
-      )}
-      <button
-        onClick={handleUpdate}
-        disabled={installing}
-        className="self-start mt-1 text-xs font-medium px-3 py-1.5 rounded-md bg-text text-bg hover:opacity-90 disabled:opacity-50 transition-opacity"
-      >
-        {installing ? "Installing..." : "Update Now"}
-      </button>
-    </div>
-  );
-}
-
 function App() {
   const { isPreview, previewFile } = useMemo(getWindowMode, []);
 
@@ -674,13 +594,6 @@ function App() {
     const os = isMac ? "mac" : isWindows ? "windows" : "linux";
     document.documentElement.classList.add(`platform-${os}`);
   }, []);
-
-  // Check for app updates on startup (folder mode only)
-  useEffect(() => {
-    if (isPreview) return;
-    const timer = setTimeout(() => showUpdateToast(), 3000);
-    return () => clearTimeout(timer);
-  }, [isPreview]);
 
   // Preview mode: lightweight editor without sidebar, search, git
   if (isPreview && previewFile) {

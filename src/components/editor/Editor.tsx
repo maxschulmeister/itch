@@ -70,7 +70,7 @@ import { SelectionMenu } from "./SelectionMenu";
 import { Wikilink, type WikilinkStorage } from "./Wikilink";
 import { WikilinkSuggestion } from "./WikilinkSuggestion";
 import { EditorWidthHandles } from "./EditorWidthHandle";
-import { ScratchBlockMath, normalizeBlockMath } from "./MathExtensions";
+import { ItchBlockMath, normalizeBlockMath } from "./MathExtensions";
 import { cn } from "../../lib/utils";
 import { plainTextFromMarkdown } from "../../lib/plainText";
 import { Button, IconButton, ToolbarButton, Tooltip } from "../ui";
@@ -1136,7 +1136,7 @@ export function Editor({
       AiHighlight,
       Wikilink,
       WikilinkSuggestion,
-      ScratchBlockMath.configure({
+      ItchBlockMath.configure({
         katexOptions: {
           throwOnError: false,
           displayMode: true,

@@ -1,12 +1,12 @@
 [package]
-name = "Scratch"
+name = "Itch"
 version = "1.0.0"
 description = "An offline markdown-based notes app"
 authors = ["erictli"]
 edition = "2021"
 
 [lib]
-name = "scratch_lib"
+name = "itch_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -18,7 +18,6 @@ tauri-plugin-opener = "2"
 tauri-plugin-fs = "2"
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
-tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"

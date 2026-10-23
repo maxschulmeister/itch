@@ -3,7 +3,7 @@
 //! App-wide settings (appearance, AI model, ...) live in `{app_data}/settings.json`
 //! and also apply to single-file windows. Library-specific settings live in
 //! `{app_data}/folders/{key}.json`, where `key` is a stable hash of the canonical
-//! folder path. Older versions stored everything in `{folder}/.scratch/settings.json`;
+//! folder path. Older Scratch versions stored everything in `{folder}/.scratch/settings.json`;
 //! that file is imported once and is never written again.
 
 use crate::Settings;
@@ -303,7 +303,7 @@ mod tests {
     }
 
     fn temp_root(name: &str) -> PathBuf {
-        let root = std::env::temp_dir().join(format!("scratch-storage-{}-{}", name, std::process::id()));
+        let root = std::env::temp_dir().join(format!("itch-storage-{}-{}", name, std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         root

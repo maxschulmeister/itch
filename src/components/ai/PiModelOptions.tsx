@@ -49,7 +49,7 @@ export function findPiModel(
 }
 
 /**
- * The default model and thinking level of Scratch: the settings, else the
+ * The default model and thinking level of Itch: the settings, else the
  * start values of pi. The level fits the model.
  */
 export function resolvePiDefaults(

@@ -84,7 +84,7 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
         <div className="m-auto w-full max-w-md p-8 select-none">
           <div className="text-center animate-fade-in-up">
             <h1 className="text-3xl text-text font-serif mb-2 tracking-[-0.01em]">
-              Welcome to Scratch
+              Welcome to Itch
             </h1>
             <p className="text-text-muted mb-6">
               Open a markdown file to edit it, or open a folder to keep your

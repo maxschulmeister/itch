@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Scratch Fork",
+  "productName": "Itch",
   "version": "1.0.0",
-  "identifier": "com.max.scratch-fork",
+  "identifier": "com.max.itch",
   "build": {
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Scratch",
+        "title": "Itch",
         "width": 1080,
         "height": 720,
         "minWidth": 600,
@@ -39,7 +39,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "createUpdaterArtifacts": true,
     "fileAssociations": [
       {
         "ext": ["md", "markdown"],
@@ -61,14 +60,6 @@
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       }
-    }
-  },
-  "plugins": {
-    "updater": {
-      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IEE3RTQ2NTA4QzJGODdFRTYKUldUbWZ2akNDR1hrcDlud3VQSVhuYVU0cDk5V0RkaVFuVElRSGRVMjlFam9IdFVCNnU1ZlVJOXEK",
-      "endpoints": [
-        "https://github.com/erictli/scratch/releases/latest/download/latest.json"
-      ]
     }
   }
 }
