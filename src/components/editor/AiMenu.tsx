@@ -32,9 +32,9 @@ import {
 import {
   AiModelOptions,
   AiThinkingOptions,
+  findAiModel,
   modelLabel,
   modelThinkingLevels,
-  resolveAiDefaults,
   useAiModels,
 } from "../ai/AiModelOptions";
 import { getSettings } from "../../services/notes";
@@ -58,10 +58,9 @@ export type AiContext = Pick<AiPromptRequest, "before" | "after" | "selection">;
 const NO_TOOL =
   "No AI tool found. Install pi, Claude Code, Codex, OpenCode or Ollama, then open the AI menu again.";
 
-/** The AI tool of the menu and its saved defaults. */
+/** The AI tool of the menu. */
 interface AiSetup {
   provider: AiProvider | null;
-  saved: { model?: string; thinking?: string };
 }
 
 export interface AiMenuProps {
@@ -127,8 +126,6 @@ export const AiMenu = memo(function AiMenu({
   const [lastRun, setLastRun] = useState<AiRun | null>(null);
   const [thinking, setThinking] = useState("");
   const [model, setModel] = useState("");
-  // The default model and thinking level are set (from the settings and the tool).
-  const [defaultsSet, setDefaultsSet] = useState(false);
   const [setup, setSetup] = useState<AiSetup | null>(null);
   const [expanded, setExpanded] = useState(!initialRun);
   const [inputFocused, setInputFocused] = useState(false);
@@ -143,11 +140,19 @@ export const AiMenu = memo(function AiMenu({
   const rootRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const answerRef = useRef<HTMLDivElement>(null);
+  // Streamed text that is not in `text` yet: it goes in once per frame.
+  const pendingTextRef = useRef("");
+  const textFrameRef = useRef(0);
 
   const busy = status === "streaming";
   const readOnly = !!lastRun?.readOnly;
   const hasResult = status === "done" && text.trim().length > 0;
-  const supportedLevels = modelThinkingLevels(models, model);
+  // A saved model that the tool no longer offers falls back to the default.
+  const activeModel =
+    models.status === "ready" && model && !findAiModel(models, model)
+      ? ""
+      : model;
+  const supportedLevels = modelThinkingLevels(models, activeModel);
   // Without the model list (loading, error) the tool fits the level.
   const effectiveThinking =
     models.status === "ready"
@@ -202,35 +207,21 @@ export const AiMenu = memo(function AiMenu({
     ]).then(([settings, installed]) => {
       if (!current) return;
       const provider = resolveProvider(settings.aiProvider, installed);
-      setSetup({
-        provider,
-        saved: provider
-          ? {
-              model: settings.aiModels?.[provider],
-              thinking: settings.aiThinking?.[provider],
-            }
-          : {},
-      });
+      // Start with the default model and thinking level of Itch, without a
+      // wait for the model list. A change in the menu is only for this
+      // conversation: the settings do not change.
+      setModel((provider && settings.aiModels?.[provider]) || "");
+      setThinking((provider && settings.aiThinking?.[provider]) || "");
+      setSetup({ provider });
+      if (!provider) {
+        setError(NO_TOOL);
+        setStatus("error");
+      }
     });
     return () => {
       current = false;
     };
   }, []);
-
-  // Start with the default model and thinking level of Itch. A change in
-  // the menu is only for this conversation: the settings do not change.
-  useEffect(() => {
-    if (defaultsSet || !setup) return;
-    if (setup.provider && models.status === "loading") return;
-    if (!setup.provider) {
-      setError(NO_TOOL);
-      setStatus("error");
-    }
-    const defaults = resolveAiDefaults(models, setup.saved);
-    setModel(defaults.model);
-    setThinking(defaults.thinking);
-    setDefaultsSet(true);
-  }, [defaultsSet, setup, models]);
 
   // Show the answer in the document (edits) or in the menu (read-only),
   // at most once per frame while it streams. The previous answer stays until
@@ -248,6 +239,17 @@ export const AiMenu = memo(function AiMenu({
   }, [text, busy, status, readOnly, renderMarkdown, onPreview]);
 
   useEffect(() => onStreamingChange(busy), [busy, onStreamingChange]);
+
+  // Adds the pending streamed text to `text`.
+  const flushText = useCallback(() => {
+    cancelAnimationFrame(textFrameRef.current);
+    textFrameRef.current = 0;
+    const pending = pendingTextRef.current;
+    pendingTextRef.current = "";
+    if (pending) setText((prev) => prev + pending);
+  }, []);
+
+  useEffect(() => () => cancelAnimationFrame(textFrameRef.current), []);
 
   // The suggestion list is below the card, outside of its size.
   useLayoutEffect(() => {
@@ -276,6 +278,9 @@ export const AiMenu = memo(function AiMenu({
   const run = useCallback(
     (aiRun: AiRun) => {
       const runId = ++runIdRef.current;
+      cancelAnimationFrame(textFrameRef.current);
+      textFrameRef.current = 0;
+      pendingTextRef.current = "";
       setLastRun(aiRun);
       setText("");
       setError(null);
@@ -298,20 +303,25 @@ export const AiMenu = memo(function AiMenu({
           instruction: aiRun.instruction,
           ...context,
           thinking: effectiveThinking || undefined,
-          model: model || undefined,
+          model: activeModel || undefined,
           readOnly: !!aiRun.readOnly && mode === "selection",
         },
         (event) => {
           if (runIdRef.current !== runId) return;
           switch (event.type) {
             case "delta":
-              setText((prev) => prev + event.text);
+              pendingTextRef.current += event.text;
+              if (!textFrameRef.current) {
+                textFrameRef.current = requestAnimationFrame(flushText);
+              }
               break;
             case "done":
+              flushText();
               setText((prev) => event.text || prev);
               setStatus("done");
               break;
             case "error":
+              flushText();
               setError(event.message);
               setStatus("error");
               break;
@@ -323,15 +333,24 @@ export const AiMenu = memo(function AiMenu({
         setStatus("error");
       });
     },
-    [provider, sessionId, context, effectiveThinking, model, mode, onPreview],
+    [
+      provider,
+      sessionId,
+      context,
+      effectiveThinking,
+      activeModel,
+      mode,
+      onPreview,
+      flushText,
+    ],
   );
 
   // A skill from the selection toolbar runs at once, with the defaults.
   useEffect(() => {
-    if (!defaultsSet || !initialRun || initialSentRef.current) return;
+    if (!setup || !initialRun || initialSentRef.current) return;
     initialSentRef.current = true;
     run(initialRun);
-  }, [defaultsSet, initialRun, run]);
+  }, [setup, initialRun, run]);
 
   const submit = useCallback(() => {
     const instruction = prompt.trim();
@@ -526,13 +545,13 @@ export const AiMenu = memo(function AiMenu({
                   <div className={SELECT_WRAPPER}>
                     <label htmlFor="ai-menu-model">Model</label>
                     <span aria-hidden="true" className="max-w-44 truncate text-text">
-                      {provider && !model && models.status === "loading"
+                      {provider && !activeModel && models.status === "loading"
                         ? "Loading…"
-                        : modelLabel(models, model)}
+                        : modelLabel(models, activeModel)}
                     </span>
                     <select
                       id="ai-menu-model"
-                      value={model}
+                      value={activeModel}
                       disabled={!provider}
                       onChange={(e) => setModel(e.target.value)}
                       aria-describedby={
@@ -540,8 +559,8 @@ export const AiMenu = memo(function AiMenu({
                       }
                       className={SELECT}
                     >
-                      {model && models.status !== "ready" && (
-                        <option value={model}>{model}</option>
+                      {activeModel && models.status !== "ready" && (
+                        <option value={activeModel}>{activeModel}</option>
                       )}
                       <AiModelOptions state={models} />
                     </select>
