@@ -152,7 +152,11 @@ function AiSettings() {
           id="ai-provider"
           value={provider ?? ""}
           disabled={!provider}
-          onChange={(e) => save(() => ({ aiProvider: e.target.value }))}
+          onChange={(e) => {
+            // Read the value now: React resets the select before `save` reads it.
+            const value = e.target.value;
+            save(() => ({ aiProvider: value }));
+          }}
           className="w-64"
         >
           {installed === null ? (
