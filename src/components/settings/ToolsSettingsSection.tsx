@@ -20,6 +20,7 @@ import {
   resolveProvider,
   type AiProvider,
 } from "../../services/inlineAi";
+import { getSettings, updateSettings } from "../../services/notes";
 import type { Settings } from "../../types/note";
 
 type CliState = {
@@ -105,7 +106,7 @@ function AiSettings() {
   }, []);
 
   useEffect(() => {
-    invoke<Settings>("get_settings")
+    getSettings()
       .then((loaded) => {
         setSettings(loaded);
         setPiPath(loaded.piPath ?? "");
@@ -117,9 +118,9 @@ function AiSettings() {
   const save = useCallback(
     async (change: (current: Settings) => Partial<Settings>) => {
       try {
-        const current = await invoke<Settings>("get_settings");
+        const current = await getSettings();
         const next = { ...current, ...change(current) };
-        await invoke("update_settings", { newSettings: next });
+        await updateSettings(next);
         setSettings(next);
         toast.success("AI settings saved");
         return true;

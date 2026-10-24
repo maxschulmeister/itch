@@ -1,4 +1,4 @@
-import { Fragment, useCallback, useEffect, useMemo, useState } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   fitThinkingLevel,
   listAiModels,
@@ -21,23 +21,36 @@ export function useAiModels(
   provider: AiProvider | null,
 ): [AiModelsState, () => void] {
   const [state, setState] = useState<AiModelsState>({ status: "loading" });
-  const [attempt, setAttempt] = useState(0);
+  // Only the answer to the last request counts.
+  const requestRef = useRef(0);
+
+  const load = useCallback((tool: AiProvider, refresh: boolean) => {
+    const request = ++requestRef.current;
+    setState({ status: "loading" });
+    listAiModels(tool, refresh)
+      .then(
+        (list) =>
+          request === requestRef.current &&
+          setState({ status: "ready", ...list }),
+      )
+      .catch(
+        (err) =>
+          request === requestRef.current &&
+          setState({ status: "error", message: String(err) }),
+      );
+  }, []);
 
   useEffect(() => {
     if (!provider) return;
-    let current = true;
-    setState({ status: "loading" });
-    listAiModels(provider, attempt > 0)
-      .then((list) => current && setState({ status: "ready", ...list }))
-      .catch(
-        (err) => current && setState({ status: "error", message: String(err) }),
-      );
+    load(provider, false);
     return () => {
-      current = false;
+      requestRef.current += 1;
     };
-  }, [provider, attempt]);
+  }, [provider, load]);
 
-  const retry = useCallback(() => setAttempt((n) => n + 1), []);
+  const retry = useCallback(() => {
+    if (provider) load(provider, true);
+  }, [provider, load]);
 
   return [state, retry];
 }

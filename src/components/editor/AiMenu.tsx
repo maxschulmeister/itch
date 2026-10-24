@@ -37,6 +37,7 @@ import {
   resolveAiDefaults,
   useAiModels,
 } from "../ai/AiModelOptions";
+import { getSettings } from "../../services/notes";
 import type { Settings } from "../../types/note";
 import { cn } from "../../lib/utils";
 import type { AiRun } from "./AiAssist";
@@ -190,7 +191,7 @@ export const AiMenu = memo(function AiMenu({
   useEffect(() => {
     let current = true;
     Promise.all([
-      invoke<Settings>("get_settings").catch((err) => {
+      getSettings().catch((err) => {
         console.error("Failed to load the AI settings:", err);
         return {} as Settings;
       }),

@@ -253,20 +253,20 @@ pub(crate) fn build_prompt(request: &PromptRequest, include_context: bool) -> St
     }
     let (before, after) = truncate_context(&request.before, &request.after, CONTEXT_BUDGET_CHARS);
     match &request.selection {
-        Some(selection) if request.read_only => format!(
-            "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
-             The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
-             <selection>\n{selection}\n</selection>\n\n\
-             Instruction: {instruction}\n\n\
-             Reply with markdown for the user to read. Do not rewrite the selected text."
-        ),
-        Some(selection) => format!(
-            "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
-             The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
-             <selection>\n{selection}\n</selection>\n\n\
-             Instruction: {instruction}\n\n\
-             Reply with only the markdown that replaces the selected text."
-        ),
+        Some(selection) => {
+            let reply = if request.read_only {
+                "Reply with markdown for the user to read. Do not rewrite the selected text."
+            } else {
+                "Reply with only the markdown that replaces the selected text."
+            };
+            format!(
+                "<document>\n{before}{SELECTION_START}{selection}{SELECTION_END}{after}\n</document>\n\n\
+                 The selected text is marked with {SELECTION_START} and {SELECTION_END} in the document above:\n\
+                 <selection>\n{selection}\n</selection>\n\n\
+                 Instruction: {instruction}\n\n\
+                 {reply}"
+            )
+        }
         None => format!(
             "<document>\n{before}{CURSOR}{after}\n</document>\n\n\
              The cursor position is marked with {CURSOR} in the document above.\n\n\

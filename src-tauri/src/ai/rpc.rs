@@ -128,7 +128,13 @@ impl Rpc {
         })?;
         match rx.recv_timeout(timeout) {
             Ok(result) => result,
-            Err(_) => Err(format!("No answer to {method} in time.")),
+            Err(_) => {
+                // A late answer has no use: forget the request.
+                if let Ok(mut pending) = self.pending.lock() {
+                    pending.responders.remove(&self.next_id);
+                }
+                Err(format!("No answer to {method} in time."))
+            }
         }
     }
 
@@ -223,6 +229,7 @@ id=$(printf '%s' "$line" | sed -n 's/.*"id":\([0-9][0-9]*\).*/\1/p')
 case "$line" in
 *'"method":"fail"'*) printf '%s\n' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"error\":{{\"code\":1,\"message\":\"bad\"}}}}";;
 *'"method":"quit"'*) echo 'Error: bye' >&2; exit 1;;
+*'"method":"silent"'*) ;;
 *'"method"'*) [ -n "$id" ] && printf '%s\n' '{{"jsonrpc":"2.0","method":"note","params":{{"n":1}}}}' "{{\"jsonrpc\":\"2.0\",\"id\":$id,\"result\":{{\"ok\":$id}}}}";;
 esac
 done"#,
@@ -255,6 +262,18 @@ done"#,
             lines.contains(r#""message":"other is not supported""#),
             "{lines}"
         );
+    }
+
+    #[test]
+    fn a_call_that_times_out_is_forgotten() {
+        let log = TempFile::new("rpc-timeout");
+        let (_file, program) = echo_tool(&log);
+        let mut rpc = Rpc::spawn("tool", Command::new(program), Recorder::default()).unwrap();
+        assert_eq!(
+            rpc.call("silent", json!({}), Duration::from_millis(300)),
+            Err("No answer to silent in time.".to_string())
+        );
+        assert!(rpc.pending.lock().unwrap().responders.is_empty());
     }
 
     #[test]
