@@ -823,7 +823,8 @@ sleep 30"#,
             log.path.display()
         ));
         let started = std::time::Instant::now();
-        while log.read().is_empty() && started.elapsed() < Duration::from_secs(10) {
+        // Wait for the full line: the fake writes it after it reads our answer.
+        while !log.read().ends_with('\n') && started.elapsed() < Duration::from_secs(30) {
             std::thread::sleep(Duration::from_millis(20));
         }
         let reply: Value = serde_json::from_str(&log.read()).unwrap();
