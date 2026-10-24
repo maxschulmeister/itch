@@ -13,7 +13,8 @@ pub(crate) mod rpc;
 use crate::{check_cli_exists, get_expanded_path, AppState};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Mutex, OnceLock};
+use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
 
@@ -275,15 +276,88 @@ pub(crate) fn build_prompt(request: &PromptRequest, include_context: bool) -> St
     }
 }
 
-/// The expanded PATH, plus the default install folders of pi and OpenCode.
-fn search_path() -> String {
-    let expanded = get_expanded_path();
-    match std::env::var("HOME") {
-        Ok(home) if !home.is_empty() => {
-            format!("{home}/.pi/agent/bin:{home}/.opencode/bin:{expanded}")
+/// Marks the PATH in the output of the login shell, which can also print
+/// other text (for example a welcome message).
+const PATH_MARK: &str = "__ITCH_PATH__";
+/// Time the login shell has to print its PATH.
+const LOGIN_SHELL_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The text between the first two `PATH_MARK`s. `None` when it is empty or
+/// not there.
+fn parse_marked_path(output: &str) -> Option<String> {
+    let start = output.find(PATH_MARK)? + PATH_MARK.len();
+    let len = output[start..].find(PATH_MARK)?;
+    Some(output[start..start + len].to_string()).filter(|path| !path.is_empty())
+}
+
+/// Asks `shell` as an interactive login shell for its PATH. `None` when
+/// the shell fails or does not answer within `timeout`.
+#[cfg(unix)]
+fn read_login_shell_path(shell: &str, timeout: Duration) -> Option<String> {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    let mut child = std::process::Command::new(shell)
+        .args([
+            "-ilc",
+            &format!("printf '{PATH_MARK}%s{PATH_MARK}' \"$PATH\""),
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .ok()?;
+    let mut stdout = child.stdout.take()?;
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut output = String::new();
+        let _ = stdout.read_to_string(&mut output);
+        let _ = tx.send(output);
+    });
+    let output = rx.recv_timeout(timeout);
+    let _ = child.kill();
+    let _ = child.wait();
+    parse_marked_path(&output.ok()?)
+}
+
+/// The PATH of the user's login shell, read once. An app that starts from
+/// the Finder does not get it, but it decides which tool (and which version)
+/// the user runs in a terminal.
+fn login_shell_path() -> Option<&'static str> {
+    static PATH: OnceLock<Option<String>> = OnceLock::new();
+    PATH.get_or_init(|| {
+        #[cfg(unix)]
+        {
+            read_login_shell_path(&std::env::var("SHELL").ok()?, LOGIN_SHELL_TIMEOUT)
         }
-        _ => expanded,
+        #[cfg(not(unix))]
+        {
+            None
+        }
+    })
+    .as_deref()
+}
+
+/// Reads the login shell PATH in the background, so that the first AI menu
+/// does not wait for it.
+pub fn warm_up() {
+    std::thread::spawn(|| {
+        login_shell_path();
+    });
+}
+
+/// The login shell PATH first, so that Itch runs the same tools as a
+/// terminal. Then the default install folders of pi and OpenCode, and the
+/// expanded PATH.
+fn search_path() -> String {
+    let mut parts: Vec<String> = login_shell_path().map(str::to_string).into_iter().collect();
+    if let Ok(home) = std::env::var("HOME") {
+        if !home.is_empty() {
+            parts.push(format!("{home}/.pi/agent/bin:{home}/.opencode/bin"));
+        }
     }
+    parts.push(get_expanded_path());
+    parts.join(":")
 }
 
 /// Returns the program to run for `provider`: the pi path from settings, or
@@ -587,6 +661,41 @@ mod tests {
         };
         assert_eq!(req.model(), None);
         assert_eq!(req.thinking(), None);
+    }
+
+    #[test]
+    fn reads_the_path_between_the_markers() {
+        assert_eq!(
+            parse_marked_path("Welcome!\n__ITCH_PATH__/a/bin:/b/bin__ITCH_PATH__\n"),
+            Some("/a/bin:/b/bin".to_string())
+        );
+        assert_eq!(parse_marked_path("no markers"), None);
+        assert_eq!(parse_marked_path("__ITCH_PATH____ITCH_PATH__"), None);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn reads_the_login_shell_path() {
+        // A fake shell that prints noise, then runs the command it gets.
+        let (_shell, shell) = test_support::fake_tool(
+            "echo 'motd'; PATH=/login/bin:/usr/bin; export PATH; eval \"$2\"",
+        );
+        assert_eq!(
+            read_login_shell_path(&shell, std::time::Duration::from_secs(10)),
+            Some("/login/bin:/usr/bin".to_string())
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_slow_login_shell_gives_no_path() {
+        let (_shell, shell) = test_support::fake_tool("sleep 30");
+        let started = std::time::Instant::now();
+        assert_eq!(
+            read_login_shell_path(&shell, std::time::Duration::from_millis(300)),
+            None
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
     #[test]

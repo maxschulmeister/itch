@@ -3315,6 +3315,7 @@ pub fn run() {
             app.manage(state);
             app.manage(ai::AiSessions::default());
             app.manage(ai::AiModels::default());
+            ai::warm_up();
 
             // Add notes folder to asset protocol scope so images can be served
             if let Some(ref folder) = app.state::<AppState>().app_config.read().expect("app_config read lock").notes_folder.clone() {
