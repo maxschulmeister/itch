@@ -584,6 +584,10 @@ export function Editor({
   const [sourceMode, setSourceMode] = useState(false);
   const [sourceContent, setSourceContent] = useState("");
   const sourceTimeoutRef = useRef<number | null>(null);
+  // The source-mode edit that waits for the auto-save delay.
+  const pendingSourceRef = useRef<{ noteId: string; content: string } | null>(
+    null,
+  );
   const sourceModeTransitionRef = useRef<{
     topBlockIndex: number;
     cursorBlockIndex: number;
@@ -1602,22 +1606,35 @@ export function Editor({
     scrollContainerRef.current?.scrollTo(0, 0);
   }, []);
 
+  // Saves the edits that wait for the auto-save delay, in both modes. The
+  // library waits for it before it closes or changes.
+  const flushAllSaves = useCallback(async () => {
+    if (sourceTimeoutRef.current) {
+      clearTimeout(sourceTimeoutRef.current);
+      sourceTimeoutRef.current = null;
+    }
+    const source = pendingSourceRef.current;
+    pendingSourceRef.current = null;
+    if (source) await saveNote(source.content, source.noteId);
+    await flushPendingSave();
+  }, [saveNote, flushPendingSave]);
+  const flushAllSavesRef = useRef(flushAllSaves);
+  flushAllSavesRef.current = flushAllSaves;
+
+  const registerSaveFlush = notesCtx?.registerSaveFlush;
+  useEffect(
+    () => registerSaveFlush?.(flushAllSaves),
+    [registerSaveFlush, flushAllSaves],
+  );
+
   // Cleanup on unmount - flush pending saves
   useEffect(() => {
     return () => {
-      if (saveTimeoutRef.current) {
-        clearTimeout(saveTimeoutRef.current);
-      }
-      // Flush any pending save before unmounting
-      if (needsSaveRef.current && editorRef.current) {
-        needsSaveRef.current = false;
-        const manager = editorRef.current.storage.markdown?.manager;
-        const markdown = manager
-          ? manager.serialize(editorRef.current.getJSON())
-          : editorRef.current.getText();
-        // Fire and forget - save will complete in background
-        saveNote(markdown);
-      }
+      // Fire and forget - the save completes in the background. The ref
+      // has the current note and save function, not the ones of the mount.
+      flushAllSavesRef.current().catch((error) =>
+        console.error("Failed to save note:", error),
+      );
       if (linkPopupRef.current) {
         linkPopupRef.current.destroy();
       }
@@ -2147,7 +2164,12 @@ export function Editor({
       if (sourceTimeoutRef.current) {
         clearTimeout(sourceTimeoutRef.current);
       }
+      pendingSourceRef.current = currentNote
+        ? { noteId: currentNote.id, content: value }
+        : null;
       sourceTimeoutRef.current = window.setTimeout(async () => {
+        sourceTimeoutRef.current = null;
+        pendingSourceRef.current = null;
         if (currentNote) {
           setIsSaving(true);
           try {

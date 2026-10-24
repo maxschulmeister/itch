@@ -42,6 +42,11 @@ interface NotesActionsContextValue {
   setNotesFolder: (path: string) => Promise<void>;
   syncNotesFolder: (path: string) => Promise<void>;
   closeNotesFolder: () => Promise<void>;
+  /**
+   * Registers the editor function that saves the edits that wait for the
+   * auto-save delay. Returns a function that removes it.
+   */
+  registerSaveFlush: (flush: () => Promise<void>) => () => void;
   search: (query: string) => Promise<void>;
   clearSearch: () => void;
   pinNote: (id: string) => Promise<void>;
@@ -504,8 +509,28 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     [refreshNotes]
   );
 
+  // Saves the pending editor edits, before the library closes or changes.
+  const saveFlushRef = useRef<(() => Promise<void>) | null>(null);
+  const registerSaveFlush = useCallback((flush: () => Promise<void>) => {
+    saveFlushRef.current = flush;
+    return () => {
+      if (saveFlushRef.current === flush) saveFlushRef.current = null;
+    };
+  }, []);
+
+  // Saves the pending edits of the old library, without the note list
+  // refresh that a save schedules: the refresh would read the new library.
+  const flushSaves = useCallback(async () => {
+    await saveFlushRef.current?.();
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+      refreshTimeoutRef.current = null;
+    }
+  }, []);
+
   const setNotesFolder = useCallback(async (path: string) => {
     try {
+      await flushSaves();
       await notesService.setNotesFolder(path);
       setNotesFolderState(path);
       // Start file watcher after setting folder
@@ -515,10 +540,11 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         err instanceof Error ? err.message : "Failed to set notes folder"
       );
     }
-  }, []);
+  }, [flushSaves]);
 
   const closeNotesFolder = useCallback(async () => {
     try {
+      await flushSaves();
       await notesService.closeNotesFolder();
       setNotesFolderState(null);
       setNotes([]);
@@ -529,7 +555,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         err instanceof Error ? err.message : "Failed to close notes folder"
       );
     }
-  }, []);
+  }, [flushSaves]);
 
   // Update local state only (backend already initialized the folder).
   // Used when the CLI sets the notes folder and emits an event.
@@ -739,6 +765,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       setNotesFolder,
       syncNotesFolder,
       closeNotesFolder,
+      registerSaveFlush,
       search,
       clearSearch,
       pinNote,
@@ -762,6 +789,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       setNotesFolder,
       syncNotesFolder,
       closeNotesFolder,
+      registerSaveFlush,
       search,
       clearSearch,
       pinNote,
