@@ -201,6 +201,18 @@ fn config_option(result: &Value, category: &str) -> Option<ConfigOption> {
     })
 }
 
+/// The text of a prompt. OpenCode runs a command (which can run shell
+/// templates or use another agent) when the text starts with "/", so such a
+/// follow-up gets a prefix and stays plain text.
+fn prompt_text(request: &PromptRequest, include_context: bool) -> String {
+    let text = build_prompt(request, include_context);
+    if text.starts_with('/') {
+        format!("Instruction: {text}")
+    } else {
+        text
+    }
+}
+
 /// How a `session/prompt` call ended: `Ok(true)` when it was cancelled, or
 /// the error for the user.
 fn prompt_outcome(result: Result<Value, String>) -> Result<bool, String> {
@@ -487,7 +499,7 @@ impl Conversation for OpenCode {
         }
         let params = json!({
             "sessionId": self.session_id,
-            "prompt": [{ "type": "text", "text": build_prompt(request, include_context) }],
+            "prompt": [{ "type": "text", "text": prompt_text(request, include_context) }],
         });
         let shared = Arc::clone(&self.shared);
         let sent = self
@@ -538,6 +550,17 @@ mod tests {
     use crate::ai::test_support::{channel_sink, collect_run, request};
     use crate::ai::AiEvent;
     use crate::get_expanded_path;
+
+    #[test]
+    fn a_follow_up_that_starts_with_a_slash_stays_text() {
+        let command = PromptRequest {
+            instruction: " /review this".to_string(),
+            ..request(None)
+        };
+        assert_eq!(prompt_text(&command, false), "Instruction: /review this");
+        assert_eq!(prompt_text(&request(None), false), "Make it shorter");
+        assert!(prompt_text(&request(None), true).starts_with("<document>"));
+    }
 
     // Lines below are copied from opencode 1.18.33 (`opencode acp`), with
     // shorter option lists.
