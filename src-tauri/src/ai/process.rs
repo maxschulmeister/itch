@@ -8,6 +8,41 @@ use std::sync::{Arc, Mutex};
 
 const STDERR_TAIL_BYTES: usize = 4096;
 
+/// Starts AI tools so that `kill_tree` can stop them with the processes that
+/// they start (for example MCP servers).
+pub trait SpawnTree {
+    /// Spawns the command as the leader of a new process group (Unix).
+    fn spawn_tree(&mut self) -> std::io::Result<Child>;
+}
+
+impl SpawnTree for Command {
+    fn spawn_tree(&mut self) -> std::io::Result<Child> {
+        #[cfg(unix)]
+        std::os::unix::process::CommandExt::process_group(self, 0);
+        self.spawn()
+    }
+}
+
+/// Kills `child` (started with `spawn_tree`) and the processes that it
+/// started, then waits for it. Call it only before the child was waited for:
+/// after that, its process id can belong to another process.
+pub fn kill_tree(child: &mut Child) {
+    #[cfg(unix)]
+    if let Ok(group) = i32::try_from(child.id()) {
+        // SAFETY: `kill` has no memory effects. The group id is the id of
+        // our child, which is not reaped yet, so it cannot be reused.
+        unsafe {
+            libc::kill(-group, libc::SIGKILL);
+        }
+    }
+    #[cfg(windows)]
+    let _ = crate::no_window_cmd("taskkill")
+        .args(["/T", "/F", "/PID", &child.id().to_string()])
+        .output();
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 /// Writes JSON lines to the stdin of a tool. Clones share the same stdin.
 #[derive(Clone)]
 pub struct JsonWriter(Arc<Mutex<ChildStdin>>);
@@ -48,13 +83,12 @@ impl JsonProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_tree()
             .map_err(|e| format!("Failed to start {tool}: {e}"))?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_tree(&mut child);
             return Err(format!("Failed to connect to {tool}."));
         };
         let writer = JsonWriter(Arc::new(Mutex::new(stdin)));
@@ -90,8 +124,7 @@ impl JsonProcess {
 
 impl Drop for JsonProcess {
     fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_tree(&mut self.child);
     }
 }
 
@@ -176,6 +209,24 @@ mod tests {
             exits.recv_timeout(Duration::from_secs(10)).unwrap(),
             "tool stopped unexpectedly: Error: no auth"
         );
+    }
+
+    #[test]
+    fn dropping_the_process_kills_the_processes_it_started() {
+        let pid_file = crate::ai::test_support::TempFile::new("grandchild-pid");
+        let (_file, process, _messages, _exits) = spawn(&format!(
+            "sleep 30 & echo $! > '{}'; wait",
+            pid_file.path.display()
+        ));
+        let started = std::time::Instant::now();
+        while pid_file.read().trim().is_empty() && started.elapsed() < Duration::from_secs(10) {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        let grandchild: u32 = pid_file.read().trim().parse().unwrap();
+        assert!(is_running(grandchild));
+        drop(process);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!is_running(grandchild));
     }
 
     #[test]

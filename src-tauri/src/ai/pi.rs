@@ -1,7 +1,7 @@
 //! The pi backend: one `pi --mode rpc` child process per popover
 //! conversation.
 
-use super::process::{exit_message, read_stderr_tail};
+use super::process::{exit_message, kill_tree, read_stderr_tail, SpawnTree};
 use super::{
     build_prompt, AiEvent, Conversation, Model, ModelList, PromptRequest, Sink, SYSTEM_PROMPT,
 };
@@ -268,13 +268,12 @@ impl PiProcess {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
-            .spawn()
+            .spawn_tree()
             .map_err(|e| format!("Failed to start pi: {e}"))?;
         let (Some(stdin), Some(stdout), Some(stderr)) =
             (child.stdin.take(), child.stdout.take(), child.stderr.take())
         else {
-            let _ = child.kill();
-            let _ = child.wait();
+            kill_tree(&mut child);
             return Err("Failed to connect to pi.".to_string());
         };
 
@@ -426,8 +425,7 @@ impl Drop for PiProcess {
         if let Ok(mut slot) = self.slot.lock() {
             slot.active = None;
         }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        kill_tree(&mut self.child);
     }
 }
 
@@ -552,13 +550,12 @@ pub fn list_models(program: &str, path_env: &str) -> Result<PiModelList, String>
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_tree()
         .map_err(|e| format!("Failed to start pi: {e}"))?;
     let (Some(stdin), Some(stdout), Some(stderr)) =
         (child.stdin.take(), child.stdout.take(), child.stderr.take())
     else {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_tree(&mut child);
         return Err("Failed to connect to pi.".to_string());
     };
     let stderr_reader = std::thread::spawn(move || read_stderr_tail(stderr));
@@ -581,8 +578,7 @@ pub fn list_models(program: &str, path_env: &str) -> Result<PiModelList, String>
         stderr_reader: Some(stderr_reader),
     };
     let result = read_model_list(&mut pi);
-    let _ = child.kill();
-    let _ = child.wait();
+    kill_tree(&mut child);
     result
 }
 

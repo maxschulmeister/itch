@@ -2,7 +2,7 @@
 //! conversation. `opencode acp` speaks the Agent Client Protocol (JSON-RPC
 //! 2.0 on stdin and stdout).
 
-use super::process::{exit_message, read_stderr_tail};
+use super::process::{exit_message, kill_tree, read_stderr_tail, SpawnTree};
 use super::rpc::{Rpc, RpcHandler};
 use super::{
     build_prompt, Conversation, Model, ModelList, PromptRequest, Run, Sink, SYSTEM_PROMPT,
@@ -102,7 +102,7 @@ fn user_mcp_servers(program: &str, path: &str) -> Result<Vec<String>, String> {
         .stdin(Stdio::null())
         .stdout(file)
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_tree()
         .map_err(|e| format!("Failed to start {TOOL}: {e}"))?;
     let deadline = Instant::now() + COMMAND_TIMEOUT;
     let status = loop {
@@ -110,8 +110,7 @@ fn user_mcp_servers(program: &str, path: &str) -> Result<Vec<String>, String> {
             Ok(Some(status)) => break status,
             Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
             result => {
-                let _ = child.kill();
-                let _ = child.wait();
+                kill_tree(&mut child);
                 return Err(match result {
                     Err(e) => format!("Failed to run {TOOL}: {e}"),
                     Ok(_) => format!("{TOOL} did not show its config in time."),
@@ -298,11 +297,10 @@ pub fn list_models(program: &str, path: &str) -> Result<ModelList, String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .spawn()
+        .spawn_tree()
         .map_err(|e| format!("Failed to start {TOOL}: {e}"))?;
     let (Some(mut stdout), Some(stderr)) = (child.stdout.take(), child.stderr.take()) else {
-        let _ = child.kill();
-        let _ = child.wait();
+        kill_tree(&mut child);
         return Err(format!("Failed to connect to {TOOL}."));
     };
     let stderr_reader = std::thread::spawn(move || read_stderr_tail(stderr));
@@ -313,7 +311,7 @@ pub fn list_models(program: &str, path: &str) -> Result<ModelList, String> {
     });
     let output = output.recv_timeout(MODELS_TIMEOUT);
     if output.is_err() {
-        let _ = child.kill();
+        kill_tree(&mut child);
     }
     let status = child.wait();
     let output = match output {

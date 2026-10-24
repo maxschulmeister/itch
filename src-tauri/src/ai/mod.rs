@@ -12,8 +12,8 @@ pub(crate) mod rpc;
 
 use crate::{check_cli_exists, get_expanded_path, AppState};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::sync::{Mutex, OnceLock};
+use std::collections::{HashMap, HashSet};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 use tauri::ipc::Channel;
 use tauri::{AppHandle, Manager, State, Window};
@@ -294,6 +294,7 @@ fn parse_marked_path(output: &str) -> Option<String> {
 /// the shell fails or does not answer within `timeout`.
 #[cfg(unix)]
 fn read_login_shell_path(shell: &str, timeout: Duration) -> Option<String> {
+    use process::{kill_tree, SpawnTree};
     use std::io::Read;
     use std::process::Stdio;
     use std::sync::mpsc;
@@ -305,7 +306,7 @@ fn read_login_shell_path(shell: &str, timeout: Duration) -> Option<String> {
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
+        .spawn_tree()
         .ok()?;
     let mut stdout = child.stdout.take()?;
     let (tx, rx) = mpsc::channel();
@@ -315,8 +316,7 @@ fn read_login_shell_path(shell: &str, timeout: Duration) -> Option<String> {
         let _ = tx.send(output);
     });
     let output = rx.recv_timeout(timeout);
-    let _ = child.kill();
-    let _ = child.wait();
+    kill_tree(&mut child);
     parse_marked_path(&output.ok()?)
 }
 
@@ -475,14 +475,143 @@ pub async fn ai_list_models(
 }
 
 struct Session {
-    window: String,
     provider: Provider,
     conversation: Box<dyn Conversation>,
 }
 
-/// Open popover conversations, by session id.
+type SharedSession = Arc<Mutex<Session>>;
+
 #[derive(Default)]
-pub struct AiSessions(Mutex<HashMap<String, Session>>);
+struct SessionMap {
+    /// Open conversations, by session id, with the label of their window.
+    open: HashMap<String, (String, SharedSession)>,
+    /// Sessions whose tool starts now, with the label of their window.
+    starting: HashMap<String, String>,
+    /// Starting sessions that were closed. Their tool stops when it started.
+    cancelled: HashSet<String>,
+}
+
+/// Open popover conversations. The map lock is held only for short map
+/// changes: a tool starts, and a prompt runs, without it. So a slow tool
+/// does not block the other sessions, and a session that closes while its
+/// tool starts does not leave the tool running.
+#[derive(Default)]
+pub struct AiSessions(Mutex<SessionMap>);
+
+impl AiSessions {
+    fn map(&self) -> Result<std::sync::MutexGuard<'_, SessionMap>, String> {
+        self.0
+            .lock()
+            .map_err(|_| "AI sessions are broken.".to_string())
+    }
+
+    fn get(&self, session_id: &str) -> Result<Option<SharedSession>, String> {
+        Ok(self
+            .map()?
+            .open
+            .get(session_id)
+            .map(|(_, session)| Arc::clone(session)))
+    }
+
+    /// Sends a prompt in the conversation `session_id` of `window`. Calls
+    /// `start` for the first prompt, or again when the tool exited.
+    fn prompt(
+        &self,
+        session_id: &str,
+        window: &str,
+        provider: Provider,
+        start: impl FnOnce() -> Result<Box<dyn Conversation>, String>,
+        request: &PromptRequest,
+        sink: Sink,
+    ) -> Result<(), String> {
+        if let Some(session) = self.get(session_id)? {
+            let mut session = session.lock().map_err(|_| "AI session is broken.")?;
+            if session.provider == provider && session.conversation.is_alive() {
+                return session.conversation.prompt(request, sink);
+            }
+        }
+        let old = {
+            let mut map = self.map()?;
+            map.starting
+                .insert(session_id.to_string(), window.to_string());
+            map.open.remove(session_id)
+        };
+        // Stop an exited tool before a new one starts.
+        drop(old);
+        let started = start();
+        let session = {
+            let mut map = self.map()?;
+            map.starting.remove(session_id);
+            if map.cancelled.remove(session_id) {
+                None
+            } else {
+                let session = Arc::new(Mutex::new(Session {
+                    provider,
+                    conversation: started?,
+                }));
+                map.open.insert(
+                    session_id.to_string(),
+                    (window.to_string(), Arc::clone(&session)),
+                );
+                Some(session)
+            }
+        };
+        // The session closed while its tool started: `started` stops the tool.
+        let Some(session) = session else {
+            return Ok(());
+        };
+        let mut session = session.lock().map_err(|_| "AI session is broken.")?;
+        session.conversation.prompt(request, sink)
+    }
+
+    fn abort(&self, session_id: &str) -> Result<(), String> {
+        match self.get(session_id)? {
+            Some(session) => session
+                .lock()
+                .map_err(|_| "AI session is broken.")?
+                .conversation
+                .abort(),
+            None => Ok(()),
+        }
+    }
+
+    /// Closes the sessions for which `closes` is true. A tool stops when the
+    /// last prompt that uses it returns.
+    fn close_where(&self, closes: impl Fn(&str, &str) -> bool) {
+        let removed: Vec<(String, SharedSession)> = match self.map() {
+            Ok(mut map) => {
+                let starting: Vec<String> = map
+                    .starting
+                    .iter()
+                    .filter(|(id, window)| closes(id, window))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                map.cancelled.extend(starting);
+                let ids: Vec<String> = map
+                    .open
+                    .iter()
+                    .filter(|(id, (window, _))| closes(id, window))
+                    .map(|(id, _)| id.clone())
+                    .collect();
+                ids.iter().filter_map(|id| map.open.remove(id)).collect()
+            }
+            Err(_) => return,
+        };
+        drop(removed);
+    }
+
+    fn close(&self, session_id: &str) {
+        self.close_where(|id, _| id == session_id);
+    }
+
+    fn close_window(&self, window_label: &str) {
+        self.close_where(|_, window| window == window_label);
+    }
+
+    fn close_all(&self) {
+        self.close_where(|_, _| true);
+    }
+}
 
 /// Sends a prompt in the conversation `session_id`. Starts the tool for the
 /// first prompt, or again when it exited.
@@ -500,28 +629,16 @@ pub async fn ai_prompt(
     let label = window.label().to_string();
 
     tauri::async_runtime::spawn_blocking(move || {
-        let sessions = app.state::<AiSessions>();
-        let mut map = sessions.0.lock().map_err(|_| "AI sessions are broken.")?;
-        let usable = map
-            .get(&session_id)
-            .is_some_and(|s| s.provider == provider && s.conversation.is_alive());
-        if !usable {
-            // Stop an exited tool before a new one starts.
-            map.remove(&session_id);
+        let start = || {
             let path = search_path();
             let program = resolve_program(provider, pi_path.as_deref(), &path)?;
-            let conversation = start(provider, &program, &path)?;
-            map.insert(
-                session_id.clone(),
-                Session {
-                    window: label,
-                    provider,
-                    conversation,
-                },
-            );
-        }
-        let session = map.get_mut(&session_id).ok_or("AI session not found.")?;
-        session.conversation.prompt(
+            start(provider, &program, &path)
+        };
+        app.state::<AiSessions>().prompt(
+            &session_id,
+            &label,
+            provider,
+            start,
             &request,
             Box::new(move |event| {
                 let _ = on_event.send(event);
@@ -534,53 +651,27 @@ pub async fn ai_prompt(
 
 #[tauri::command]
 pub async fn ai_abort(sessions: State<'_, AiSessions>, session_id: String) -> Result<(), String> {
-    let mut map = sessions.0.lock().map_err(|_| "AI sessions are broken.")?;
-    match map.get_mut(&session_id) {
-        Some(session) => session.conversation.abort(),
-        None => Ok(()),
-    }
+    sessions.abort(&session_id)
 }
 
 #[tauri::command]
 pub async fn ai_close(sessions: State<'_, AiSessions>, session_id: String) -> Result<(), String> {
-    let removed = sessions
-        .0
-        .lock()
-        .map_err(|_| "AI sessions are broken.")?
-        .remove(&session_id);
-    drop(removed);
+    sessions.close(&session_id);
     Ok(())
 }
 
 /// Stops the AI tools of a closed window.
 pub fn close_window_sessions(app: &AppHandle, window_label: &str) {
-    let Some(sessions) = app.try_state::<AiSessions>() else {
-        return;
-    };
-    let removed: Vec<Session> = match sessions.0.lock() {
-        Ok(mut map) => {
-            let ids: Vec<String> = map
-                .iter()
-                .filter(|(_, s)| s.window == window_label)
-                .map(|(id, _)| id.clone())
-                .collect();
-            ids.iter().filter_map(|id| map.remove(id)).collect()
-        }
-        Err(_) => return,
-    };
-    drop(removed);
+    if let Some(sessions) = app.try_state::<AiSessions>() {
+        sessions.close_window(window_label);
+    }
 }
 
 /// Stops all AI tools. Call when the app exits.
 pub fn close_all(app: &AppHandle) {
-    let Some(sessions) = app.try_state::<AiSessions>() else {
-        return;
-    };
-    let removed: Vec<Session> = match sessions.0.lock() {
-        Ok(mut map) => map.drain().map(|(_, s)| s).collect(),
-        Err(_) => return,
-    };
-    drop(removed);
+    if let Some(sessions) = app.try_state::<AiSessions>() {
+        sessions.close_all();
+    }
 }
 
 #[cfg(test)]
@@ -589,6 +680,7 @@ pub(crate) mod test_support;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::mpsc;
     use test_support::request;
 
     #[test]
@@ -661,6 +753,191 @@ mod tests {
         };
         assert_eq!(req.model(), None);
         assert_eq!(req.thinking(), None);
+    }
+
+    /// A conversation that counts prompts and tells when it is dropped.
+    struct FakeConversation {
+        prompts: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: mpsc::Sender<()>,
+        alive: bool,
+    }
+
+    impl Conversation for FakeConversation {
+        fn prompt(&mut self, _: &PromptRequest, _: Sink) -> Result<(), String> {
+            self.prompts
+                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn abort(&mut self) -> Result<(), String> {
+            Ok(())
+        }
+        fn is_alive(&self) -> bool {
+            self.alive
+        }
+    }
+
+    impl Drop for FakeConversation {
+        fn drop(&mut self) {
+            let _ = self.dropped.send(());
+        }
+    }
+
+    struct Fake {
+        prompts: Arc<std::sync::atomic::AtomicUsize>,
+        dropped: mpsc::Receiver<()>,
+        conversation: Option<FakeConversation>,
+    }
+
+    fn fake(alive: bool) -> Fake {
+        let prompts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let (tx, dropped) = mpsc::channel();
+        Fake {
+            prompts: Arc::clone(&prompts),
+            dropped,
+            conversation: Some(FakeConversation {
+                prompts,
+                dropped: tx,
+                alive,
+            }),
+        }
+    }
+
+    impl Fake {
+        fn prompts(&self) -> usize {
+            self.prompts.load(std::sync::atomic::Ordering::SeqCst)
+        }
+        fn is_dropped(&self) -> bool {
+            self.dropped
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .is_ok()
+        }
+    }
+
+    fn sink() -> Sink {
+        Box::new(|_| {})
+    }
+
+    /// Starts `fake` in the session `id` on a thread. The start waits until
+    /// `release` gets a message. `entered` gets a message when it starts.
+    fn start_in_background(
+        sessions: &Arc<AiSessions>,
+        id: &str,
+        window: &str,
+        conversation: FakeConversation,
+    ) -> (
+        mpsc::Receiver<()>,
+        mpsc::Sender<()>,
+        std::thread::JoinHandle<Result<(), String>>,
+    ) {
+        let (entered_tx, entered) = mpsc::channel();
+        let (release, release_rx) = mpsc::channel::<()>();
+        let (sessions, id, window) = (Arc::clone(sessions), id.to_string(), window.to_string());
+        let handle = std::thread::spawn(move || {
+            sessions.prompt(
+                &id,
+                &window,
+                Provider::Pi,
+                move || {
+                    let _ = entered_tx.send(());
+                    let _ = release_rx.recv();
+                    Ok(Box::new(conversation) as Box<dyn Conversation>)
+                },
+                &request(None),
+                sink(),
+            )
+        });
+        (entered, release, handle)
+    }
+
+    #[test]
+    fn sessions_start_once_and_reuse_the_conversation() {
+        let sessions = AiSessions::default();
+        let mut first = fake(true);
+        let conversation = first.conversation.take().unwrap();
+        let start = || Ok(Box::new(conversation) as Box<dyn Conversation>);
+        sessions
+            .prompt("s", "w", Provider::Pi, start, &request(None), sink())
+            .unwrap();
+        let unused = || Err::<Box<dyn Conversation>, String>("no second start".to_string());
+        sessions
+            .prompt("s", "w", Provider::Pi, unused, &request(None), sink())
+            .unwrap();
+        assert_eq!(first.prompts(), 2);
+        sessions.close("s");
+        assert!(first.is_dropped());
+    }
+
+    #[test]
+    fn sessions_replace_an_exited_conversation() {
+        let sessions = AiSessions::default();
+        let mut dead = fake(false);
+        let conversation = dead.conversation.take().unwrap();
+        let start = || Ok(Box::new(conversation) as Box<dyn Conversation>);
+        sessions
+            .prompt("s", "w", Provider::Pi, start, &request(None), sink())
+            .unwrap();
+        let mut next = fake(true);
+        let conversation = next.conversation.take().unwrap();
+        let start = || Ok(Box::new(conversation) as Box<dyn Conversation>);
+        sessions
+            .prompt("s", "w", Provider::Pi, start, &request(None), sink())
+            .unwrap();
+        assert!(dead.is_dropped());
+        assert_eq!(next.prompts(), 1);
+    }
+
+    #[test]
+    fn closing_during_the_start_stops_the_new_tool() {
+        let sessions = Arc::new(AiSessions::default());
+        let mut tool = fake(true);
+        let (entered, release, handle) =
+            start_in_background(&sessions, "s", "w", tool.conversation.take().unwrap());
+        entered.recv().unwrap();
+        sessions.close("s");
+        release.send(()).unwrap();
+        assert_eq!(handle.join().unwrap(), Ok(()));
+        assert!(tool.is_dropped());
+        assert_eq!(tool.prompts(), 0);
+        assert!(sessions.0.lock().unwrap().open.is_empty());
+    }
+
+    #[test]
+    fn closing_the_window_during_the_start_stops_the_new_tool() {
+        let sessions = Arc::new(AiSessions::default());
+        let mut tool = fake(true);
+        let (entered, release, handle) =
+            start_in_background(&sessions, "s", "w", tool.conversation.take().unwrap());
+        entered.recv().unwrap();
+        sessions.close_window("other");
+        sessions.close_window("w");
+        release.send(()).unwrap();
+        assert_eq!(handle.join().unwrap(), Ok(()));
+        assert!(tool.is_dropped());
+        assert_eq!(tool.prompts(), 0);
+    }
+
+    #[test]
+    fn a_slow_start_does_not_block_other_sessions() {
+        let sessions = Arc::new(AiSessions::default());
+        let mut slow = fake(true);
+        let (entered, release, handle) =
+            start_in_background(&sessions, "slow", "w", slow.conversation.take().unwrap());
+        entered.recv().unwrap();
+        // While "slow" starts, other sessions work.
+        let mut other = fake(true);
+        let conversation = other.conversation.take().unwrap();
+        let start = || Ok(Box::new(conversation) as Box<dyn Conversation>);
+        sessions
+            .prompt("other", "w", Provider::Pi, start, &request(None), sink())
+            .unwrap();
+        sessions.abort("other").unwrap();
+        sessions.close("other");
+        assert!(other.is_dropped());
+        release.send(()).unwrap();
+        assert_eq!(handle.join().unwrap(), Ok(()));
+        assert_eq!(slow.prompts(), 1);
+        sessions.close_all();
+        assert!(slow.is_dropped());
     }
 
     #[test]

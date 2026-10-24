@@ -9,6 +9,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "chrono",
+ "libc",
  "notify",
  "objc2-foundation",
  "open",
