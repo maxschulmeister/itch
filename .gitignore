@@ -27,6 +27,10 @@ dist-ssr
 src-tauri/target/
 src-tauri/gen/
 
+# Playwright
+test-results/
+playwright-report/
+
 # Build secrets
 .env.build
 

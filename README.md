@@ -63,6 +63,16 @@ npm run tauri dev      # Development
 npm run tauri build    # Production build
 ```
 
+### Tests
+
+```bash
+npx playwright install chromium
+npm test
+cargo test --manifest-path src-tauri/Cargo.toml --lib
+```
+
+The browser tests run the real interface with mocked native Tauri commands.
+
 ## Keyboard Shortcuts
 
 Itch is designed to be usable without a mouse. Here are the essentials to get started:
