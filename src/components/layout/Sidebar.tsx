@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 import { toast } from "sonner";
+import { listen } from "@tauri-apps/api/event";
 import * as DropdownMenu from "@radix-ui/react-dropdown-menu";
 import {
   DndContext,
@@ -25,6 +26,7 @@ import {
 } from "../icons";
 import { mod, shift, isMac, isWindows } from "../../lib/platform";
 import * as notesService from "../../services/notes";
+import type { Settings } from "../../types/note";
 import { FolderNameDialog } from "../notes/FolderNameDialog";
 
 interface SidebarProps {
@@ -173,6 +175,22 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       console.error("Failed to load settings:", error);
       setFoldersEnabled(false);
     });
+  }, []);
+
+  // Follow the folders setting of the Settings window
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<Settings>("settings-changed", (event) => {
+      if (!cancelled) setFoldersEnabled(event.payload.foldersEnabled === true);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
   }, []);
 
   // Sync input with search query

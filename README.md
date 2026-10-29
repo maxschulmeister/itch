@@ -47,7 +47,7 @@ A minimalist, offline-first markdown note-taking app for macOS, Windows, and Lin
 
 Download the latest `.dmg` (macOS), `.exe` (Windows), or `.AppImage` / `.deb` (Linux) from [Releases](https://github.com/maxschulmeister/itch/releases).
 
-To use the inline AI menu, install [pi](https://github.com/earendil-works/pi), Claude Code, Codex, OpenCode, or Ollama and sign in to a model provider if the tool needs it. You can choose the tool, model, thinking level, and pi path in Settings → Tools.
+To use the inline AI menu, install [pi](https://github.com/earendil-works/pi), Claude Code, Codex, OpenCode, or Ollama and sign in to a model provider if the tool needs it. You can choose the tool, model, thinking level, and pi path in Settings → Integrations. Press `Cmd+,` (`Ctrl+,` on Windows/Linux) to open Settings in a separate window without closing your note.
 
 ### From Source
 

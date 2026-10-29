@@ -2,7 +2,6 @@ import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { NotesProvider, useNotes } from "./context/NotesContext";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
-import { listen } from "@tauri-apps/api/event";
 import { GitProvider } from "./context/GitContext";
 import { TooltipProvider, Toaster } from "./components/ui";
 import { Sidebar } from "./components/layout/Sidebar";
@@ -18,10 +17,12 @@ import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcuts
 import { PreviewApp } from "./components/preview/PreviewApp";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import * as filesService from "./services/files";
+import { openSettingsWindow } from "./services/settings";
 import { isMac, isWindows } from "./lib/platform";
 
-// Detect preview mode from URL search params
+// Detect the window mode from URL search params
 function getWindowMode(): {
+  isSettings: boolean;
   isPreview: boolean;
   previewFile: string | null;
 } {
@@ -29,12 +30,11 @@ function getWindowMode(): {
   const mode = params.get("mode");
   const file = params.get("file");
   return {
+    isSettings: mode === "settings",
     isPreview: mode === "preview" && !!file,
     previewFile: file,
   };
 }
-
-type ViewState = "notes" | "settings";
 
 function AppContent() {
   const {
@@ -49,42 +49,14 @@ function AppContent() {
     searchResults,
     reloadCurrentNote,
     currentNote,
-    syncNotesFolder,
   } = useNotes();
-  const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
-  const interfaceZoomRef = useRef(interfaceZoom);
-  interfaceZoomRef.current = interfaceZoom;
   const currentNoteRef = useRef(currentNote);
   currentNoteRef.current = currentNote;
   const [paletteOpen, setPaletteOpen] = useState(false);
-  const [view, setView] = useState<ViewState>("notes");
   const [sidebarVisible, setSidebarVisible] = useState(true);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [focusMode, setFocusMode] = useState(false);
   const editorRef = useRef<TiptapEditor | null>(null);
-
-  // Listen for set-notes-folder event from CLI (itch .)
-  // Placed here in AppContent where both NotesContext and ThemeContext are available
-  useEffect(() => {
-    let cancelled = false;
-    let unlisten: (() => void) | undefined;
-    listen<string>("set-notes-folder", async (event) => {
-      await syncNotesFolder(event.payload);
-      await reloadSettings();
-    }).then((fn) => {
-      if (cancelled) fn();
-      else unlisten = fn;
-    });
-    return () => {
-      cancelled = true;
-      unlisten?.();
-    };
-  }, [syncNotesFolder, reloadSettings]);
-
-  // Leave settings when the library closes, so that the start screen shows
-  useEffect(() => {
-    if (!notesFolder) setView("notes");
-  }, [notesFolder]);
 
   const toggleSidebar = useCallback(() => {
     setSidebarVisible((prev) => !prev);
@@ -102,14 +74,6 @@ function AppContent() {
     });
   }, [selectedNoteId]);
 
-  const toggleSettings = useCallback(() => {
-    setView((prev) => (prev === "settings" ? "notes" : "settings"));
-  }, []);
-
-  const closeSettings = useCallback(() => {
-    setView("notes");
-  }, []);
-
   // Memoize display items to prevent unnecessary recalculations
   const displayItems = useMemo(() => {
     return searchQuery.trim() ? searchResults : notes;
@@ -124,44 +88,6 @@ function AppContent() {
         target.tagName === "INPUT" || target.tagName === "TEXTAREA";
       const isEditorEmpty =
         isInEditor && currentNoteRef.current?.content.trim() === "";
-
-      // Cmd+, - Toggle settings (always works, even in settings)
-      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
-        e.preventDefault();
-        toggleSettings();
-        return;
-      }
-
-      // Cmd+= or Cmd++ - Zoom in (works everywhere, including settings)
-      if ((e.metaKey || e.ctrlKey) && (e.key === "=" || e.key === "+")) {
-        e.preventDefault();
-        setInterfaceZoom((prev) => prev + 0.05);
-        const newZoom = Math.round(Math.min(interfaceZoomRef.current + 0.05, 1.5) * 20) / 20;
-        toast(`Zoom ${Math.round(newZoom * 100)}%`, { id: "zoom", duration: 1500 });
-        return;
-      }
-
-      // Cmd+- - Zoom out (works everywhere, including settings)
-      if ((e.metaKey || e.ctrlKey) && (e.key === "-" || e.key === "_")) {
-        e.preventDefault();
-        setInterfaceZoom((prev) => prev - 0.05);
-        const newZoom = Math.round(Math.max(interfaceZoomRef.current - 0.05, 0.7) * 20) / 20;
-        toast(`Zoom ${Math.round(newZoom * 100)}%`, { id: "zoom", duration: 1500 });
-        return;
-      }
-
-      // Cmd+0 - Reset zoom (works everywhere, including settings)
-      if ((e.metaKey || e.ctrlKey) && e.key === "0") {
-        e.preventDefault();
-        setInterfaceZoom(1.0);
-        toast("Zoom 100%", { id: "zoom", duration: 1500 });
-        return;
-      }
-
-      // Block all other shortcuts when in settings view
-      if (view === "settings") {
-        return;
-      }
 
       // Cmd+Shift+Enter - Toggle focus mode
       if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key === "Enter") {
@@ -367,12 +293,9 @@ function AppContent() {
     reloadCurrentNote,
     selectedNoteId,
     selectNote,
-    toggleSettings,
     toggleSidebar,
     toggleFocusMode,
     focusMode,
-    view,
-    setInterfaceZoom,
   ]);
 
   const handleClosePalette = useCallback(() => {
@@ -392,38 +315,28 @@ function AppContent() {
   }
 
   if (!notesFolder) {
-    return view === "settings" ? (
-      <SettingsPage onBack={closeSettings} />
-    ) : (
-      <StartScreen onOpenSettings={toggleSettings} />
-    );
+    return <StartScreen onOpenSettings={openSettingsWindow} />;
   }
 
   return (
     <>
       <div className="h-full min-h-0 flex bg-bg text-text overflow-hidden">
-        {view === "settings" ? (
-          <SettingsPage onBack={closeSettings} />
-        ) : (
-          <>
-            <div
-              data-sidebar
-              style={{ width: (!sidebarVisible || focusMode) ? 0 : `var(--sidebar-width, ${SIDEBAR_DEFAULT_PX}px)` }}
-              className={`relative transition-all duration-500 ease-out overflow-hidden ${!sidebarVisible || focusMode ? "opacity-0 -translate-x-4 pointer-events-none" : "opacity-100 translate-x-0"}`}
-            >
-              <Sidebar onOpenSettings={toggleSettings} />
-              {sidebarVisible && !focusMode && <SidebarResizeHandle />}
-            </div>
-            <Editor
-              onToggleSidebar={toggleSidebar}
-              sidebarVisible={sidebarVisible}
-              focusMode={focusMode}
-              onEditorReady={(editor) => {
-                editorRef.current = editor;
-              }}
-            />
-          </>
-        )}
+        <div
+          data-sidebar
+          style={{ width: (!sidebarVisible || focusMode) ? 0 : `var(--sidebar-width, ${SIDEBAR_DEFAULT_PX}px)` }}
+          className={`relative transition-all duration-500 ease-out overflow-hidden ${!sidebarVisible || focusMode ? "opacity-0 -translate-x-4 pointer-events-none" : "opacity-100 translate-x-0"}`}
+        >
+          <Sidebar onOpenSettings={openSettingsWindow} />
+          {sidebarVisible && !focusMode && <SidebarResizeHandle />}
+        </div>
+        <Editor
+          onToggleSidebar={toggleSidebar}
+          sidebarVisible={sidebarVisible}
+          focusMode={focusMode}
+          onEditorReady={(editor) => {
+            editorRef.current = editor;
+          }}
+        />
       </div>
 
       {/* Backdrop for the command palette */}
@@ -442,7 +355,7 @@ function AppContent() {
       <CommandPalette
         open={paletteOpen}
         onClose={handleClosePalette}
-        onOpenSettings={toggleSettings}
+        onOpenSettings={openSettingsWindow}
         onOpenShortcuts={() => setShortcutsOpen(true)}
         focusMode={focusMode}
         onToggleFocusMode={toggleFocusMode}
@@ -452,12 +365,45 @@ function AppContent() {
   );
 }
 
-function App() {
-  const { isPreview, previewFile } = useMemo(getWindowMode, []);
+function ZoomShortcuts() {
+  const { interfaceZoom, setInterfaceZoom } = useTheme();
+  const zoomRef = useRef(interfaceZoom);
+  zoomRef.current = interfaceZoom;
 
-  // Cmd/Ctrl+W — close window, Cmd/Ctrl+O — open file (both preview and folder mode)
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
+      if (!e.metaKey && !e.ctrlKey) return;
+      let zoom: number;
+      if (e.key === "=" || e.key === "+") {
+        zoom = Math.round(Math.min(zoomRef.current + 0.05, 1.5) * 20) / 20;
+      } else if (e.key === "-" || e.key === "_") {
+        zoom = Math.round(Math.max(zoomRef.current - 0.05, 0.7) * 20) / 20;
+      } else if (e.key === "0") {
+        zoom = 1;
+      } else {
+        return;
+      }
+      e.preventDefault();
+      setInterfaceZoom(zoom);
+      toast(`Zoom ${Math.round(zoom * 100)}%`, { id: "zoom", duration: 1500 });
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [setInterfaceZoom]);
+
+  return null;
+}
+
+function App() {
+  const { isSettings, isPreview, previewFile } = useMemo(getWindowMode, []);
+
+  // Shortcuts shared by the library, file and Settings windows.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.metaKey || e.ctrlKey) && e.key === ",") {
+        e.preventDefault();
+        openSettingsWindow();
+      }
       if ((e.metaKey || e.ctrlKey) && e.key === "w") {
         e.preventDefault();
         getCurrentWindow().close().catch(console.error);
@@ -480,28 +426,20 @@ function App() {
     document.documentElement.classList.add(`platform-${os}`);
   }, []);
 
-  // Preview mode: lightweight editor without sidebar, search, git
-  if (isPreview && previewFile) {
-    return (
-      <ThemeProvider>
-        <Toaster />
-        <TooltipProvider>
-          <PreviewApp filePath={decodeURIComponent(previewFile)} />
-        </TooltipProvider>
-      </ThemeProvider>
-    );
-  }
-
-  // Folder mode: full app with sidebar, search, git, etc.
   return (
     <ThemeProvider>
       <Toaster />
       <TooltipProvider>
-        <NotesProvider>
-          <GitProvider>
-            <AppContent />
-          </GitProvider>
-        </NotesProvider>
+        <ZoomShortcuts />
+        {isPreview && previewFile ? (
+          <PreviewApp filePath={decodeURIComponent(previewFile)} />
+        ) : (
+          <NotesProvider settingsWindow={isSettings}>
+            <GitProvider background={!isSettings}>
+              {isSettings ? <SettingsPage /> : <AppContent />}
+            </GitProvider>
+          </NotesProvider>
+        )}
       </TooltipProvider>
     </ThemeProvider>
   );

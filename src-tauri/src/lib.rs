@@ -857,6 +857,9 @@ fn initialize_notes_folder(app: &AppHandle, path_buf: &PathBuf, state: &AppState
         }
     }
 
+    let settings = state.settings.read().expect("settings read lock").clone();
+    let _ = app.emit("settings-changed", settings);
+    let _ = app.emit("set-notes-folder", Some(&normalized_path));
     Ok(normalized_path)
 }
 
@@ -876,6 +879,7 @@ fn get_notes_folder(state: State<AppState>) -> Option<String> {
 fn set_notes_folder(app: AppHandle, path: String, state: State<AppState>) -> Result<(), String> {
     let path_buf = normalize_notes_folder_path(&path)?;
     initialize_notes_folder(&app, &path_buf, &state)?;
+    show_main_window(&app);
     Ok(())
 }
 
@@ -3084,6 +3088,54 @@ fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String>
     Ok(())
 }
 
+#[tauri::command]
+async fn open_settings_window<R: tauri::Runtime>(app: AppHandle<R>) -> Result<(), String> {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let handle = app.clone();
+    // Serialize creation on the UI thread so simultaneous requests reuse one window.
+    app.run_on_main_thread(move || {
+        let result = (|| {
+            if let Some(window) = handle.get_webview_window("settings") {
+                // The frontend focuses the window only after its theme is ready.
+                return window.emit("focus-settings", ()).map_err(|e| e.to_string());
+            }
+            let builder = WebviewWindowBuilder::new(
+                &handle,
+                "settings",
+                WebviewUrl::App("index.html?mode=settings".into()),
+            )
+            .title("Settings — Itch")
+            .inner_size(960.0, 680.0)
+            .min_inner_size(700.0, 480.0)
+            .visible(false);
+
+            #[cfg(target_os = "macos")]
+            let builder = builder
+                .title_bar_style(tauri::TitleBarStyle::Overlay)
+                .hidden_title(true);
+
+            builder.build().map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        let _ = sender.send(result);
+    })
+    .map_err(|e| e.to_string())?;
+    receiver.await.map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+async fn show_settings_window<R: tauri::Runtime>(
+    window: tauri::WebviewWindow<R>,
+    background: tauri::window::Color,
+) -> Result<(), String> {
+    window
+        .set_background_color(Some(background))
+        .map_err(|e| e.to_string())?;
+    window.unminimize().map_err(|e| e.to_string())?;
+    window.show().map_err(|e| e.to_string())?;
+    window.set_focus().map_err(|e| e.to_string())
+}
+
 fn show_main_window(app: &AppHandle) {
     if let Some(main_window) = app.get_webview_window("main") {
         let _ = main_window.show();
@@ -3213,6 +3265,9 @@ fn close_notes_folder(app: AppHandle, state: State<AppState>) -> Result<(), Stri
     *state.file_watcher.lock().expect("file watcher mutex") = None;
     *state.search_index.lock().expect("search index mutex") = None;
     state.notes_cache.write().expect("cache write lock").clear();
+    let settings = state.settings.read().expect("settings read lock").clone();
+    let _ = app.emit("settings-changed", settings);
+    let _ = app.emit("set-notes-folder", Option::<String>::None);
     Ok(())
 }
 
@@ -3251,11 +3306,7 @@ fn open_paths(app: &AppHandle, paths: &[PathBuf]) -> bool {
             // Full initialization: directory creation, write-access check,
             // asset-scope update, config/settings persist, and search-index rebuild
             match initialize_notes_folder(app, &canonical, &state) {
-                Ok(normalized_path) => {
-                    // Emit event for when app is already running (single-instance)
-                    let _ = app.emit("set-notes-folder", normalized_path);
-                    used_library = true;
-                }
+                Ok(_) => used_library = true,
                 Err(e) => {
                     eprintln!("Failed to initialize notes folder {:?}: {}", canonical, e);
                 }
@@ -3476,6 +3527,8 @@ pub fn run() {
             import_file_to_folder,
             open_file_preview,
             create_file,
+            open_settings_window,
+            show_settings_window,
             get_recent_files,
             close_notes_folder,
             install_cli,
@@ -3518,6 +3571,62 @@ pub fn run() {
             _ => {}
         }
     });
+}
+
+#[cfg(test)]
+mod settings_window_tests {
+    use super::*;
+    use tauri::Listener;
+
+    #[test]
+    fn saved_settings_emit_change_notification() {
+        let app = tauri::test::mock_app();
+        let root = std::env::temp_dir().join(format!("itch-settings-event-{}", std::process::id()));
+        app.manage(AppState {
+            app_data_dir: root.clone(),
+            ..Default::default()
+        });
+        let (sender, receiver) = std::sync::mpsc::channel();
+        app.listen("settings-changed", move |event| {
+            sender.send(event.payload().to_string()).unwrap();
+        });
+
+        update_settings(
+            app.handle().clone(),
+            Settings {
+                theme: ThemeSettings {
+                    mode: "dark".to_string(),
+                    ..Default::default()
+                },
+                interface_zoom: Some(1.2),
+                ..Default::default()
+            },
+            app.state(),
+        )
+        .unwrap();
+
+        let payload = receiver.recv_timeout(Duration::from_secs(1)).unwrap();
+        let settings: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(settings["theme"]["mode"], "dark");
+        assert_eq!(settings["interfaceZoom"], 1.2);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn settings_opens_in_one_separate_window() {
+        let app = tauri::test::mock_app();
+        WebviewWindowBuilder::new(&app, "main", WebviewUrl::default())
+            .build()
+            .unwrap();
+        tauri::async_runtime::block_on(open_settings_window(app.handle().clone())).unwrap();
+
+        let window = app.get_webview_window("settings").expect("settings window");
+        assert_eq!(window.url().unwrap().query(), Some("mode=settings"));
+
+        tauri::async_runtime::block_on(open_settings_window(app.handle().clone())).unwrap();
+        assert!(app.get_webview_window("main").is_some());
+        assert_eq!(app.webview_windows().len(), 2);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -3587,7 +3696,7 @@ fn set_title_bar_theme(
     #[cfg(target_os = "windows")]
     {
         for (label, window) in app.webview_windows() {
-            if label == "main" || label.starts_with("preview-") {
+            if label == "main" || label == "settings" || label.starts_with("preview-") {
                 windows_title_bar::apply_title_bar_theme(&window, is_dark, (r, g, b));
             }
         }

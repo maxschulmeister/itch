@@ -3,6 +3,7 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { toast } from "sonner";
 import { Editor, type PreviewModeData } from "../editor/Editor";
+import { openSettingsWindow } from "../../services/settings";
 import * as filesService from "../../services/files";
 import { getNotesFolder } from "../../services/notes";
 
@@ -216,6 +217,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
         previewMode={previewData}
         onSaveToFolder={hasLibrary ? handleSaveToFolder : undefined}
         saveToFolderDisabled={isSaving}
+        onOpenSettings={openSettingsWindow}
       />
     </div>
   );

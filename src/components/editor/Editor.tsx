@@ -110,6 +110,7 @@ import {
   MarkdownIcon,
   MarkdownOffIcon,
   FolderPlusIcon,
+  SettingsIcon,
 } from "../icons";
 
 function formatDateTime(timestamp: number): string {
@@ -463,6 +464,7 @@ interface EditorProps {
   onEditorReady?: (editor: TiptapEditor | null) => void;
   onSaveToFolder?: () => void;
   saveToFolderDisabled?: boolean;
+  onOpenSettings?: () => void;
 }
 
 /**
@@ -526,6 +528,7 @@ export function Editor({
   previewMode,
   onSaveToFolder,
   saveToFolderDisabled,
+  onOpenSettings,
 }: EditorProps) {
   // Always call the hook (rules of hooks), but it returns null outside NotesProvider
   const notesCtx = useOptionalNotes();
@@ -2472,6 +2475,16 @@ export function Editor({
                 )}
               </IconButton>
             </Tooltip>
+          )}
+          {onOpenSettings && (
+            <IconButton
+              onClick={onOpenSettings}
+              aria-label="Settings"
+              title={`Settings (${mod}${isMac ? "" : "+"},)`}
+              tabIndex={0}
+            >
+              <SettingsIcon className="w-4.5 h-4.5 stroke-[1.5]" />
+            </IconButton>
           )}
         </div>
       </div>

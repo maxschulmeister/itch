@@ -12,6 +12,7 @@ import { listen } from "@tauri-apps/api/event";
 import * as gitService from "../services/git";
 import * as notesService from "../services/notes";
 import type { GitStatus } from "../services/git";
+import type { Settings } from "../types/note";
 import { useNotesData } from "./NotesContext";
 
 interface GitContextValue {
@@ -45,7 +46,17 @@ interface GitContextValue {
 
 const GitContext = createContext<GitContextValue | null>(null);
 
-export function GitProvider({ children }: { children: ReactNode }) {
+/**
+ * `background` fetches the remote and follows file changes. Only one window
+ * (the library window) does this; the Settings window shows the status.
+ */
+export function GitProvider({
+  children,
+  background = true,
+}: {
+  children: ReactNode;
+  background?: boolean;
+}) {
   const { notesFolder } = useNotesData();
   const [status, setStatus] = useState<GitStatus | null>(null);
   const [isLoading, setIsLoading] = useState(false);
@@ -376,6 +387,26 @@ export function GitProvider({ children }: { children: ReactNode }) {
     };
   }, [notesFolder]);
 
+  // Another window changed the git setting of the library
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<Settings>("settings-changed", (event) => {
+      const enabled = event.payload.gitEnabled;
+      if (cancelled || typeof enabled !== "boolean") return;
+      if (enabled === gitEnabledRef.current) return;
+      settingsReadRequestIdRef.current += 1;
+      setGitEnabledState(enabled);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
+
   // Clear git-specific UI state when disabled
   useEffect(() => {
     if (gitEnabled) return;
@@ -405,7 +436,13 @@ export function GitProvider({ children }: { children: ReactNode }) {
   // Fetch is separated from status to keep status checks fast and offline-friendly
   // Uses recursive setTimeout to prevent overlapping runs on slow networks
   useEffect(() => {
-    if (!notesFolder || !gitAvailable || !gitEnabled || !status?.hasRemote) {
+    if (
+      !background ||
+      !notesFolder ||
+      !gitAvailable ||
+      !gitEnabled ||
+      !status?.hasRemote
+    ) {
       return;
     }
 
@@ -428,11 +465,12 @@ export function GitProvider({ children }: { children: ReactNode }) {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [notesFolder, gitAvailable, gitEnabled, status?.hasRemote]);
+  }, [background, notesFolder, gitAvailable, gitEnabled, status?.hasRemote]);
 
   // Refresh status on file changes (debounced via existing file watcher)
   // Uses a ref so the listener is registered only once
   useEffect(() => {
+    if (!background) return;
     let unlisten: (() => void) | undefined;
     let debounceTimer: number | undefined;
 
@@ -454,7 +492,18 @@ export function GitProvider({ children }: { children: ReactNode }) {
       if (unlisten) unlisten();
       if (debounceTimer) clearTimeout(debounceTimer);
     };
-  }, []);
+  }, [background]);
+
+  // Show the git changes that the Settings window made, when the user
+  // comes back to this window
+  useEffect(() => {
+    if (!background) return;
+    const refresh = () => {
+      refreshStatusRef.current();
+    };
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [background]);
 
   const value = useMemo<GitContextValue>(
     () => ({

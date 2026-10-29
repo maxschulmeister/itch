@@ -8,7 +8,8 @@ import {
   useRef,
   type ReactNode,
 } from "react";
-import { listen } from "@tauri-apps/api/event";
+import { emitTo, listen } from "@tauri-apps/api/event";
+import { Window } from "@tauri-apps/api/window";
 import type { Note, NoteMetadata } from "../types/note";
 import * as notesService from "../services/notes";
 import type { SearchResult } from "../services/notes";
@@ -40,7 +41,6 @@ interface NotesActionsContextValue {
   refreshNotes: () => Promise<void>;
   reloadCurrentNote: () => Promise<void>;
   setNotesFolder: (path: string) => Promise<void>;
-  syncNotesFolder: (path: string) => Promise<void>;
   closeNotesFolder: () => Promise<void>;
   /**
    * Registers the editor function that saves the edits that wait for the
@@ -62,7 +62,34 @@ interface NotesActionsContextValue {
 const NotesDataContext = createContext<NotesDataContextValue | null>(null);
 const NotesActionsContext = createContext<NotesActionsContextValue | null>(null);
 
-export function NotesProvider({ children }: { children: ReactNode }) {
+// Listens to a backend or window event until the returned function runs.
+function subscribe<T>(event: string, handler: (payload: T) => void) {
+  let cancelled = false;
+  let unlisten: (() => void) | undefined;
+  listen<T>(event, (e) => {
+    if (!cancelled) handler(e.payload);
+  }).then((fn) => {
+    if (cancelled) fn();
+    else unlisten = fn;
+  });
+  return () => {
+    cancelled = true;
+    unlisten?.();
+  };
+}
+
+/**
+ * The library window owns the notes, the file watcher and the editor. The
+ * Settings window (`settingsWindow`) only knows the folder, and asks the
+ * library window to change the library, so that it saves its edits first.
+ */
+export function NotesProvider({
+  children,
+  settingsWindow = false,
+}: {
+  children: ReactNode;
+  settingsWindow?: boolean;
+}) {
   const [notes, setNotes] = useState<NoteMetadata[]>([]);
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [currentNote, setCurrentNote] = useState<Note | null>(null);
@@ -92,16 +119,22 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const searchRequestIdRef = useRef(0);
   // Tracks the ID of a newly created note so Editor can focus its title.
   const pendingNewNoteIdRef = useRef<string | null>(null);
+  // The folder that the state shows, also before the next render.
+  const notesFolderRef = useRef<string | null>(null);
 
   const refreshNotes = useCallback(async () => {
     if (!notesFolder) return;
     try {
+      if (settingsWindow) {
+        await emitTo("main", "refresh-notes-request");
+        return;
+      }
       const notesList = await notesService.listNotes();
       setNotes(notesList);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to load notes");
     }
-  }, [notesFolder]);
+  }, [notesFolder, settingsWindow]);
 
   // Debounced refresh - coalesces rapid saves into a single refresh
   const scheduleRefresh = useCallback(() => {
@@ -528,51 +561,75 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const setNotesFolder = useCallback(async (path: string) => {
-    try {
-      await flushSaves();
-      await notesService.setNotesFolder(path);
+  // Shows a new library, or the start screen for null. The library window
+  // forgets the old library and watches the new one; it lists its notes
+  // when the folder changes.
+  const applyNotesFolder = useCallback(
+    async (path: string | null) => {
+      if (path === notesFolderRef.current) return;
+      notesFolderRef.current = path;
       setNotesFolderState(path);
-      // Start file watcher after setting folder
-      await notesService.startFileWatcher();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to set notes folder"
-      );
-    }
-  }, [flushSaves]);
-
-  const closeNotesFolder = useCallback(async () => {
-    try {
-      await flushSaves();
-      await notesService.closeNotesFolder();
-      setNotesFolderState(null);
+      if (settingsWindow) return;
+      selectRequestIdRef.current += 1;
+      searchRequestIdRef.current += 1;
+      pendingNewNoteIdRef.current = null;
       setNotes([]);
       setSelectedNoteId(null);
       setCurrentNote(null);
+      setHasExternalChanges(false);
+      setSearchQuery("");
+      setSearchResults([]);
+      setIsSearching(false);
+      if (!path) return;
+      try {
+        await notesService.startFileWatcher();
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to watch notes folder"
+        );
+      }
+    },
+    [settingsWindow]
+  );
+
+  // Changes the library, or closes it for null. The Settings window lets
+  // the library window do it, when that window exists.
+  const changeNotesFolder = useCallback(
+    async (path: string | null) => {
+      if (settingsWindow && (await Window.getByLabel("main"))) {
+        await emitTo("main", "change-notes-folder-request", path);
+        return;
+      }
+      await flushSaves();
+      if (path) await notesService.setNotesFolder(path);
+      else await notesService.closeNotesFolder();
+      await applyNotesFolder(path);
+    },
+    [settingsWindow, flushSaves, applyNotesFolder]
+  );
+
+  const setNotesFolder = useCallback(
+    async (path: string) => {
+      try {
+        await changeNotesFolder(path);
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to set notes folder"
+        );
+      }
+    },
+    [changeNotesFolder]
+  );
+
+  const closeNotesFolder = useCallback(async () => {
+    try {
+      await changeNotesFolder(null);
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Failed to close notes folder"
       );
     }
-  }, [flushSaves]);
-
-  // Update local state only (backend already initialized the folder).
-  // Used when the CLI sets the notes folder and emits an event.
-  const syncNotesFolder = useCallback(async (path: string) => {
-    try {
-      setNotesFolderState(path);
-      setSelectedNoteId(null);
-      setCurrentNote(null);
-      const notesList = await notesService.listNotes();
-      setNotes(notesList);
-      await notesService.startFileWatcher();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Failed to sync notes folder"
-      );
-    }
-  }, []);
+  }, [changeNotesFolder]);
 
   const search = useCallback(async (query: string) => {
     const requestId = ++searchRequestIdRef.current;
@@ -643,8 +700,9 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     async function init() {
       try {
         const folder = await notesService.getNotesFolder();
+        notesFolderRef.current = folder;
         setNotesFolderState(folder);
-        if (folder) {
+        if (folder && !settingsWindow) {
           const notesList = await notesService.listNotes();
           setNotes(notesList);
           // Start file watcher
@@ -657,10 +715,32 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       }
     }
     init();
-  }, []);
+  }, [settingsWindow]);
+
+  // The backend changed the library (any window, the CLI or Open With)
+  useEffect(
+    () => subscribe<string | null>("set-notes-folder", applyNotesFolder),
+    [applyNotesFolder]
+  );
+
+  // The Settings window asks to change or close the library
+  useEffect(() => {
+    if (settingsWindow) return;
+    return subscribe<string | null>("change-notes-folder-request", (path) => {
+      if (path) setNotesFolder(path);
+      else closeNotesFolder();
+    });
+  }, [settingsWindow, setNotesFolder, closeNotesFolder]);
+
+  // The Settings window changed which notes the list shows
+  useEffect(() => {
+    if (settingsWindow) return;
+    return subscribe("refresh-notes-request", refreshNotes);
+  }, [settingsWindow, refreshNotes]);
 
   // Listen for file change events and notify if current note changed externally
   useEffect(() => {
+    if (settingsWindow) return;
     let isCancelled = false;
     let unlisten: (() => void) | undefined;
 
@@ -700,10 +780,11 @@ export function NotesProvider({ children }: { children: ReactNode }) {
         unlisten();
       }
     };
-  }, [refreshNotes]);
+  }, [settingsWindow, refreshNotes]);
 
   // Listen for "select-note" events from the backend (CLI, drag-drop, Open With, import from preview)
   useEffect(() => {
+    if (settingsWindow) return;
     const unlisten = listen<string>("select-note", (event) => {
       // Refresh the notes list so the sidebar shows the new note immediately
       refreshNotes();
@@ -712,14 +793,14 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     return () => {
       unlisten.then((fn) => fn());
     };
-  }, [selectNote, refreshNotes]);
+  }, [settingsWindow, selectNote, refreshNotes]);
 
   // Refresh notes when folder changes
   useEffect(() => {
-    if (notesFolder) {
+    if (notesFolder && !settingsWindow) {
       refreshNotes();
     }
-  }, [notesFolder, refreshNotes]);
+  }, [notesFolder, settingsWindow, refreshNotes]);
 
   // Memoize data context value to prevent unnecessary re-renders
   const dataValue = useMemo<NotesDataContextValue>(
@@ -763,7 +844,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       refreshNotes,
       reloadCurrentNote,
       setNotesFolder,
-      syncNotesFolder,
       closeNotesFolder,
       registerSaveFlush,
       search,
@@ -787,7 +867,6 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       refreshNotes,
       reloadCurrentNote,
       setNotesFolder,
-      syncNotesFolder,
       closeNotesFolder,
       registerSaveFlush,
       search,

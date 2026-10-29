@@ -34,6 +34,9 @@ tauri-plugin-single-instance = "2"
 chrono = "0.4"
 ureq = { version = "3.5", default-features = false }
 
+[dev-dependencies]
+tauri = { version = "2", features = ["test"] }
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 

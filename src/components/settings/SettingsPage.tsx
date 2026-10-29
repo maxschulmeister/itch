@@ -1,23 +1,21 @@
 import { useState, useEffect, useRef } from "react";
+import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { defaultThemeColors, parseCssColorToRgb } from "../../context/ThemeContext";
 import {
-  ArrowLeftIcon,
   FolderIcon,
   SwatchIcon,
   KeyboardIcon,
   InfoIcon,
   IntegrationsIcon,
 } from "../icons";
-import { Button, IconButton } from "../ui";
+import { Button } from "../ui";
 import { GeneralSettingsSection } from "./GeneralSettingsSection";
 import { AppearanceSettingsSection } from "./EditorSettingsSection";
 import { ShortcutsSettingsSection } from "./ShortcutsSettingsSection";
 import { AboutSettingsSection } from "./AboutSettingsSection";
 import { ToolsSettingsSection } from "./ToolsSettingsSection";
-import { mod, isMac, isWindows } from "../../lib/platform";
-
-interface SettingsPageProps {
-  onBack: () => void;
-}
+import { mod, isWindows } from "../../lib/platform";
 
 type SettingsTab = "general" | "tools" | "editor" | "shortcuts" | "about";
 
@@ -34,9 +32,38 @@ const tabs: {
   { id: "about", label: "About", icon: InfoIcon, shortcut: "5" },
 ];
 
-export function SettingsPage({ onBack }: SettingsPageProps) {
+export function SettingsPage() {
   const [activeTab, setActiveTab] = useState<SettingsTab>("general");
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+
+  // The native window stays hidden until the saved theme has been applied.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    const show = () => {
+      if (cancelled) return;
+      const root = document.documentElement;
+      const color = getComputedStyle(root).getPropertyValue("--color-bg");
+      const theme = root.classList.contains("dark") ? "dark" : "light";
+      const background = parseCssColorToRgb(color) ??
+        parseCssColorToRgb(defaultThemeColors[theme].bg)!;
+      invoke("show_settings_window", { background }).catch((error) => {
+        console.error("Failed to show Settings:", error);
+      });
+    };
+    listen("focus-settings", show).then((fn) => {
+      if (cancelled) {
+        fn();
+        return;
+      }
+      unlisten = fn;
+      show();
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, []);
 
   // Reset scroll position when tab changes
   useEffect(() => {
@@ -79,17 +106,8 @@ export function SettingsPage({ onBack }: SettingsPageProps) {
         {/* Drag region */}
         {!isWindows && <div className="h-11 shrink-0" data-tauri-drag-region></div>}
 
-        {/* Header with back button and Settings title */}
-        <div className={`flex items-center justify-between px-3 pb-2 border-b border-border shrink-0${isWindows ? " pt-2" : ""}`}>
-          <div className="flex items-center gap-1">
-            <IconButton
-              onClick={onBack}
-              title={`Back (${mod}${isMac ? "" : "+"},)`}
-            >
-              <ArrowLeftIcon className="w-4.5 h-4.5 stroke-[1.5]" />
-            </IconButton>
-            <div className="font-medium text-base">Settings</div>
-          </div>
+        <div className={`px-4 pb-2 border-b border-border shrink-0${isWindows ? " pt-2" : ""}`}>
+          <h1 className="h-7 flex items-center font-medium text-base">Settings</h1>
         </div>
 
         {/* Navigation tabs */}
