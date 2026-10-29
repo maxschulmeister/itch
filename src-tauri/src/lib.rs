@@ -1738,7 +1738,8 @@ fn get_settings(state: State<AppState>) -> Settings {
 }
 
 #[tauri::command]
-fn update_settings(
+fn update_settings<R: tauri::Runtime>(
+    app: AppHandle<R>,
     new_settings: Settings,
     state: State<AppState>,
 ) -> Result<(), String> {
@@ -1756,12 +1757,15 @@ fn update_settings(
 
     let settings = state.settings.read().expect("settings read lock");
     storage::save(&state.app_data_dir, folder.as_deref(), &settings).map_err(|e| e.to_string())?;
-
+    let saved = settings.clone();
+    drop(settings);
+    let _ = app.emit("settings-changed", saved);
     Ok(())
 }
 
 #[tauri::command]
 fn update_git_enabled(
+    app: AppHandle,
     enabled: Option<bool>,
     expected_folder: String,
     state: State<AppState>,
@@ -1784,7 +1788,9 @@ fn update_git_enabled(
 
     let settings = state.settings.read().expect("settings read lock");
     storage::save(&state.app_data_dir, Some(&folder), &settings).map_err(|e| e.to_string())?;
-
+    let saved = settings.clone();
+    drop(settings);
+    let _ = app.emit("settings-changed", saved);
     Ok(())
 }
 

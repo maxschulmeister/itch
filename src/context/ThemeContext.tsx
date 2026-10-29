@@ -3,13 +3,17 @@ import {
   useContext,
   useState,
   useEffect,
+  useLayoutEffect,
   useCallback,
+  useRef,
   type ReactNode,
 } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { getSettings, updateSettings } from "../services/notes";
 import { SIDEBAR_MIN_PX, SIDEBAR_MAX_PX } from "../lib/sidebar";
 import type {
+  Settings,
   ThemeSettings,
   EditorFontSettings,
   FontFamily,
@@ -79,7 +83,7 @@ export { defaultThemeColors };
 
 // Normalize any CSS color string (hex, rgb(), rgba(), hsl(), named) to an RGB
 // triple by letting the browser parse it via getComputedStyle.
-function parseCssColorToRgb(value: string): [number, number, number] | null {
+export function parseCssColorToRgb(value: string): [number, number, number] | null {
   if (typeof document === "undefined") return null;
   const probe = document.createElement("div");
   probe.style.color = value;
@@ -180,6 +184,20 @@ function isTextDirection(value: unknown): value is TextDirection {
   return value === "auto" || value === "ltr" || value === "rtl";
 }
 
+function isEditorWidth(value: unknown): value is EditorWidth {
+  return (
+    value === "narrow" ||
+    value === "normal" ||
+    value === "wide" ||
+    value === "full" ||
+    value === "custom"
+  );
+}
+
+function clampZoom(zoom: number) {
+  return Math.round(Math.min(Math.max(zoom, 0.7), 1.5) * 20) / 20;
+}
+
 export function ThemeProvider({ children }: ThemeProviderProps) {
   const [theme, setThemeState] = useState<ThemeMode>("system");
   const [editorFontSettings, setEditorFontSettings] = useState<
@@ -202,68 +220,53 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       : "light";
   });
 
+  // Shows the saved settings. Absent or invalid values show the defaults.
+  const applySettings = useCallback((settings: Settings) => {
+    const mode = settings.theme?.mode;
+    setThemeState(mode === "light" || mode === "dark" ? mode : "system");
+    // Filter out null/undefined values to preserve defaults
+    const fontSettings = Object.fromEntries(
+      Object.entries(settings.editorFont ?? {}).filter(([, v]) => v != null)
+    ) as Partial<EditorFontSettings>;
+    setEditorFontSettings({ ...defaultEditorFontSettings, ...fontSettings });
+    setTextDirectionState(
+      isTextDirection(settings.textDirection) ? settings.textDirection : "auto"
+    );
+    setEditorWidthState(
+      isEditorWidth(settings.editorWidth) ? settings.editorWidth : "normal"
+    );
+    setInterfaceZoomState(
+      typeof settings.interfaceZoom === "number" &&
+        settings.interfaceZoom >= 0.7 &&
+        settings.interfaceZoom <= 1.5
+        ? settings.interfaceZoom
+        : 1.0
+    );
+    setCustomEditorWidthPxState(
+      typeof settings.customEditorWidthPx === "number" &&
+        settings.customEditorWidthPx >= 480
+        ? settings.customEditorWidthPx
+        : DEFAULT_CUSTOM_WIDTH_PX
+    );
+    setSidebarWidthPxState(
+      typeof settings.sidebarWidthPx === "number" &&
+        settings.sidebarWidthPx >= SIDEBAR_MIN_PX &&
+        settings.sidebarWidthPx <= SIDEBAR_MAX_PX
+        ? settings.sidebarWidthPx
+        : null
+    );
+    setCustomColorsLightState(settings.customColorsLight ?? {});
+    setCustomColorsDarkState(settings.customColorsDark ?? {});
+  }, []);
+
   // Function to load settings from backend
   const loadSettingsFromBackend = useCallback(async () => {
     try {
-      const settings = await getSettings();
-      if (settings.theme) {
-        const mode = settings.theme.mode as ThemeMode;
-        if (mode === "light" || mode === "dark" || mode === "system") {
-          setThemeState(mode);
-        }
-      }
-      if (settings.editorFont) {
-        // Filter out null/undefined values to preserve defaults
-        const fontSettings = Object.fromEntries(
-          Object.entries(settings.editorFont).filter(([, v]) => v != null)
-        ) as Partial<EditorFontSettings>;
-        setEditorFontSettings({
-          ...defaultEditorFontSettings,
-          ...fontSettings,
-        });
-      }
-      if (isTextDirection(settings.textDirection)) {
-        setTextDirectionState(settings.textDirection);
-      }
-      if (
-        settings.editorWidth === "narrow" ||
-        settings.editorWidth === "normal" ||
-        settings.editorWidth === "wide" ||
-        settings.editorWidth === "full" ||
-        settings.editorWidth === "custom"
-      ) {
-        setEditorWidthState(settings.editorWidth);
-      }
-      if (
-        typeof settings.interfaceZoom === "number" &&
-        settings.interfaceZoom >= 0.7 &&
-        settings.interfaceZoom <= 1.5
-      ) {
-        setInterfaceZoomState(settings.interfaceZoom);
-      }
-      if (
-        typeof settings.customEditorWidthPx === "number" &&
-        settings.customEditorWidthPx >= 480
-      ) {
-        setCustomEditorWidthPxState(settings.customEditorWidthPx);
-      }
-      if (
-        typeof settings.sidebarWidthPx === "number" &&
-        settings.sidebarWidthPx >= SIDEBAR_MIN_PX &&
-        settings.sidebarWidthPx <= SIDEBAR_MAX_PX
-      ) {
-        setSidebarWidthPxState(settings.sidebarWidthPx);
-      }
-      if (settings.customColorsLight) {
-        setCustomColorsLightState(settings.customColorsLight);
-      }
-      if (settings.customColorsDark) {
-        setCustomColorsDarkState(settings.customColorsDark);
-      }
+      applySettings(await getSettings());
     } catch {
       // If settings can't be loaded, use defaults
     }
-  }, []);
+  }, [applySettings]);
 
   // Reload settings from backend (exposed to context consumers)
   const reloadSettings = useCallback(async () => {
@@ -276,6 +279,22 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
       setIsInitialized(true);
     });
   }, [loadSettingsFromBackend]);
+
+  // Show the settings that any window saves. Do not save them again.
+  useEffect(() => {
+    let cancelled = false;
+    let unlisten: (() => void) | undefined;
+    listen<Settings>("settings-changed", (event) => {
+      if (!cancelled) applySettings(event.payload);
+    }).then((fn) => {
+      if (cancelled) fn();
+      else unlisten = fn;
+    });
+    return () => {
+      cancelled = true;
+      unlisten?.();
+    };
+  }, [applySettings]);
 
   // Listen for system theme changes
   useEffect(() => {
@@ -290,8 +309,8 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   // Resolve the actual theme to use
   const resolvedTheme = theme === "system" ? systemTheme : theme;
 
-  // Apply theme to document (just toggle dark class)
-  useEffect(() => {
+  // Apply the theme before the window can paint.
+  useLayoutEffect(() => {
     const root = document.documentElement;
     if (resolvedTheme === "dark") {
       root.classList.add("dark");
@@ -378,16 +397,17 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   );
 
   // Update a single font setting
+  const editorFontSettingsRef = useRef(editorFontSettings);
+  editorFontSettingsRef.current = editorFontSettings;
   const setEditorFontSetting = useCallback(
     <K extends keyof EditorFontSettings>(
       key: K,
       value: EditorFontSettings[K]
     ) => {
-      setEditorFontSettings((prev) => {
-        const updated = { ...prev, [key]: value };
-        saveFontSettings(updated);
-        return updated;
-      });
+      const updated = { ...editorFontSettingsRef.current, [key]: value };
+      editorFontSettingsRef.current = updated;
+      setEditorFontSettings(updated);
+      saveFontSettings(updated);
     },
     [saveFontSettings]
   );
@@ -443,30 +463,24 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   }, []);
 
   // Save and set interface zoom (accepts absolute value or updater function)
+  const interfaceZoomRef = useRef(interfaceZoom);
+  interfaceZoomRef.current = interfaceZoom;
   const setInterfaceZoom = useCallback(
     (zoomOrUpdater: number | ((prev: number) => number)) => {
-      setInterfaceZoomState((prev) => {
-        const raw =
-          typeof zoomOrUpdater === "function"
-            ? zoomOrUpdater(prev)
-            : zoomOrUpdater;
-        return Math.round(Math.min(Math.max(raw, 0.7), 1.5) * 20) / 20;
-      });
+      const zoom = clampZoom(
+        typeof zoomOrUpdater === "function"
+          ? zoomOrUpdater(interfaceZoomRef.current)
+          : zoomOrUpdater
+      );
+      if (zoom === interfaceZoomRef.current) return;
+      interfaceZoomRef.current = zoom;
+      setInterfaceZoomState(zoom);
+      getSettings()
+        .then((settings) => updateSettings({ ...settings, interfaceZoom: zoom }))
+        .catch((error) => console.error("Failed to save interface zoom:", error));
     },
     [],
   );
-
-  // Persist interface zoom changes to backend
-  useEffect(() => {
-    if (!isInitialized) return;
-    getSettings()
-      .then((settings) =>
-        updateSettings({ ...settings, interfaceZoom }),
-      )
-      .catch((error) =>
-        console.error("Failed to save interface zoom:", error),
-      );
-  }, [interfaceZoom, isInitialized]);
 
   // Set custom width in px (persists to settings)
   const setCustomEditorWidthPx = useCallback(async (px: number) => {
@@ -509,8 +523,8 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
     }
   }, []);
 
-  // Apply custom color CSS variable overrides whenever theme or colors change
-  useEffect(() => {
+  // Apply custom color CSS variable overrides before the window can paint.
+  useLayoutEffect(() => {
     const root = document.documentElement;
     const activeColors = resolvedTheme === "dark" ? customColorsDark : customColorsLight;
     const defaults = defaultThemeColors[resolvedTheme];
