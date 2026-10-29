@@ -127,6 +127,16 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
         return;
       }
 
+      // Cmd+N: New file
+      if (modKey && !e.shiftKey && e.key.toLowerCase() === "n") {
+        e.preventDefault();
+        filesService.createFileWithDialog().catch((err) => {
+          console.error("Failed to create file:", err);
+          toast.error("Failed to create file");
+        });
+        return;
+      }
+
       // Cmd+R: Reload file from disk
       if (modKey && e.key === "r") {
         e.preventDefault();

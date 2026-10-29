@@ -29,6 +29,10 @@ export class Native {
   settings: Args = { theme: { mode: "light" } };
   notesFolder: string | null = null;
   notes: Record<string, string> = {};
+  /** The path that the user selects in the native save dialog. */
+  pathToSave: string | null = null;
+  /** The paths of the `create_file` calls. */
+  createdFiles: string[] = [];
   /** The folder that the user selects in the native folder dialog. */
   folderToChoose: string | null = null;
   /** When set, the native Settings window does not open, with this error. */
@@ -140,6 +144,11 @@ export class Native {
         return [];
       case "get_default_ignored_patterns":
         return ["node_modules", ".git"];
+      case "plugin:dialog|save":
+        return this.pathToSave;
+      case "create_file":
+        this.createdFiles.push(args.path);
+        return null;
       case "open_folder_dialog":
         return this.folderToChoose;
       case "list_notes":

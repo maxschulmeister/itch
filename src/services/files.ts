@@ -1,5 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
 
 export interface FileContent {
   path: string;
@@ -32,6 +32,18 @@ export async function openFileWithDialog(): Promise<void> {
   });
   if (typeof selected === "string") {
     await openFilePreview(selected);
+  }
+}
+
+// Ask where to save a new markdown file, then create it and open it in its own window
+export async function createFileWithDialog(): Promise<void> {
+  const selected = await save({
+    title: "New File",
+    defaultPath: "Untitled.md",
+    filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
+  });
+  if (selected) {
+    await invoke("create_file", { path: selected });
   }
 }
 

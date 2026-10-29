@@ -3139,6 +3139,49 @@ async fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Write a new markdown file at a path from the save dialog. Returns the path of the file.
+async fn write_new_file(path: &Path) -> Result<PathBuf, String> {
+    // The save dialog asked before it gave an existing path, so that file can be replaced.
+    // Some Linux dialogs do not add the extension; the file with the added extension
+    // was not confirmed, so it must not exist yet.
+    let confirmed = is_markdown_extension(path);
+    let file_path = if confirmed {
+        path.to_path_buf()
+    } else {
+        let mut with_extension = path.as_os_str().to_owned();
+        with_extension.push(".md");
+        PathBuf::from(with_extension)
+    };
+
+    let title = file_path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("Untitled");
+    let mut options = fs::OpenOptions::new();
+    options.write(true);
+    if confirmed {
+        options.create(true).truncate(true);
+    } else {
+        options.create_new(true);
+    }
+    let mut file = options
+        .open(&file_path)
+        .await
+        .map_err(|e| format!("Cannot create file: {}", e))?;
+    file.write_all(format!("# {}\n\n", title).as_bytes())
+        .await
+        .map_err(|e| format!("Cannot write file: {}", e))?;
+    Ok(file_path)
+}
+
+// Async: creating a window in a sync command can deadlock on Windows.
+#[tauri::command]
+async fn create_file(app: AppHandle, path: String) -> Result<(), String> {
+    let file_path = write_new_file(Path::new(&path)).await?;
+    open_markdown_file(&app, &file_path)?;
+    Ok(())
+}
+
 /// Recently opened files that still exist, most recent first.
 #[tauri::command]
 fn get_recent_files(state: State<AppState>) -> Vec<String> {
@@ -3426,6 +3469,7 @@ pub fn run() {
             save_file_direct,
             import_file_to_folder,
             open_file_preview,
+            create_file,
             get_recent_files,
             close_notes_folder,
             install_cli,
@@ -3547,4 +3591,57 @@ fn set_title_bar_theme(
         let _ = (app, is_dark, r, g, b);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod new_file_tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("itch-new-file-{}-{}", name, std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn creates_markdown_file_with_title() {
+        let dir = temp_dir("create");
+        let path = dir.join("Ideas.md");
+
+        let created = tauri::async_runtime::block_on(write_new_file(&path)).unwrap();
+
+        assert_eq!(created, path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\n");
+    }
+
+    #[test]
+    fn adds_md_extension_when_missing() {
+        let dir = temp_dir("extension");
+
+        let created = tauri::async_runtime::block_on(write_new_file(&dir.join("Ideas"))).unwrap();
+
+        assert_eq!(created, dir.join("Ideas.md"));
+        assert!(created.is_file());
+    }
+
+    #[test]
+    fn keeps_existing_file_when_extension_is_added() {
+        let dir = temp_dir("keep");
+        std::fs::write(dir.join("Ideas.md"), "old text").unwrap();
+
+        assert!(tauri::async_runtime::block_on(write_new_file(&dir.join("Ideas"))).is_err());
+        assert_eq!(std::fs::read_to_string(dir.join("Ideas.md")).unwrap(), "old text");
+    }
+
+    #[test]
+    fn replaces_file_that_save_dialog_confirmed() {
+        let dir = temp_dir("replace");
+        let path = dir.join("Ideas.md");
+        std::fs::write(&path, "old text").unwrap();
+
+        tauri::async_runtime::block_on(write_new_file(&path)).unwrap();
+
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\n");
+    }
 }

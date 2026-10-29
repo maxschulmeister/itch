@@ -240,10 +240,17 @@ function AppContent() {
         return;
       }
 
-      // Cmd+N - New note
-      if ((e.metaKey || e.ctrlKey) && e.key === "n") {
+      // Cmd+N - New note, or a new file on the start screen
+      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        createNote();
+        if (notesFolder) {
+          createNote();
+        } else {
+          filesService.createFileWithDialog().catch((err) => {
+            console.error("Failed to create file:", err);
+            toast.error("Failed to create file");
+          });
+        }
         return;
       }
 
@@ -353,6 +360,7 @@ function AppContent() {
       window.removeEventListener("contextmenu", handleContextMenu);
     };
   }, [
+    notesFolder,
     createNote,
     duplicateNote,
     displayItems,

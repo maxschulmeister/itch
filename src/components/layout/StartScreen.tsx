@@ -46,6 +46,15 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
     }
   };
 
+  const handleNewFile = async () => {
+    try {
+      await filesService.createFileWithDialog();
+    } catch (err) {
+      console.error("Failed to create file:", err);
+      toast.error("Failed to create file");
+    }
+  };
+
   const handleOpenRecent = async (path: string) => {
     try {
       await filesService.openFilePreview(path);
@@ -87,8 +96,8 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
               Welcome to Itch
             </h1>
             <p className="text-text-muted mb-6">
-              Open a markdown file to edit it, or open a folder to keep your
-              notes together in a library.
+              Create or open a markdown file to edit it, or open a folder to
+              keep your notes together in a library.
             </p>
           </div>
 
@@ -97,7 +106,15 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
             style={{ animationDelay: "100ms" }}
           >
             <Button
+              onClick={handleNewFile}
+              size="xl"
+              title={`New File (${shortcut(mod, "N")})`}
+            >
+              New File…
+            </Button>
+            <Button
               onClick={handleOpenFile}
+              variant="outline"
               size="xl"
               title={`Open File (${shortcut(mod, "O")})`}
             >
