@@ -3046,7 +3046,10 @@ fn is_markdown_extension(path: &Path) -> bool {
 }
 
 // Preview mode: create a lightweight window for editing a single file
-fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String> {
+fn create_preview_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    file_path: &str,
+) -> Result<(), String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
 
@@ -3065,6 +3068,11 @@ fn create_preview_window(app: &AppHandle, file_path: &str) -> Result<(), String>
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Preview".to_string());
+
+    // Add the file's folder to asset protocol scope so relative images can be served
+    if let Some(folder) = Path::new(file_path).parent() {
+        let _ = app.asset_protocol_scope().allow_directory(folder, true);
+    }
 
     let encoded_path = urlencoding::encode(file_path);
     let url = format!("index.html?mode=preview&file={}", encoded_path);
@@ -3626,6 +3634,31 @@ mod settings_window_tests {
         tauri::async_runtime::block_on(open_settings_window(app.handle().clone())).unwrap();
         assert!(app.get_webview_window("main").is_some());
         assert_eq!(app.webview_windows().len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod file_window_tests {
+    use super::*;
+
+    #[test]
+    fn file_window_can_show_images_next_to_the_file() {
+        let app = tauri::test::mock_app();
+        let root = std::env::temp_dir().join(format!("itch-file-images-{}", std::process::id()));
+        let folder = root.join(".hidden").join("brief");
+        std::fs::create_dir_all(folder.join("img")).unwrap();
+        std::fs::write(folder.join("README.md"), "![](a.png)").unwrap();
+        std::fs::write(folder.join("a.png"), "").unwrap();
+        std::fs::write(folder.join("img").join("b.png"), "").unwrap();
+        let scope = app.asset_protocol_scope();
+        assert!(!scope.is_allowed(folder.join("a.png")));
+
+        let file = folder.join("README.md").canonicalize().unwrap();
+        create_preview_window(app.handle(), &file.to_string_lossy()).unwrap();
+
+        assert!(scope.is_allowed(folder.join("a.png")));
+        assert!(scope.is_allowed(folder.join("img").join("b.png")));
+        std::fs::remove_dir_all(root).unwrap();
     }
 }
 
