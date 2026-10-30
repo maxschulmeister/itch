@@ -68,6 +68,7 @@ export class Native {
     );
     await page.addInitScript(`${tauriMocks}
       mockWindows(${JSON.stringify(label)});
+      mockConvertFileSrc("macos");
       mockIPC((cmd, args) => window.__native(cmd, args), { shouldMockEvents: true });
       // The mock drops emitTo; send it to the native side like Tauri does.
       const invokeInWindow = window.__TAURI_INTERNALS__.invoke;

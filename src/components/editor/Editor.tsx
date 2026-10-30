@@ -15,7 +15,7 @@ import {
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
-import Image from "@tiptap/extension-image";
+import { LocalImage } from "./LocalImage";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { TableKit } from "@tiptap/extension-table";
@@ -624,6 +624,10 @@ export function Editor({
   // Keep ref in sync with current note ID
   currentNoteIdRef.current = currentNote?.id ?? null;
 
+  // Folder of the current note, used to resolve relative image paths
+  const noteDirRef = useRef<string | null>(null);
+  noteDirRef.current = currentNote?.path.replace(/[\\/][^\\/]*$/, "") ?? null;
+
   // Get markdown from editor
   const getMarkdown = useCallback(
     (editorInstance: ReturnType<typeof useEditor>) => {
@@ -1117,9 +1121,10 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
+      LocalImage.configure({
         inline: false,
         allowBase64: false,
+        getNoteDir: () => noteDirRef.current,
       }),
       TaskList,
       TaskItem.configure({
