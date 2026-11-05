@@ -147,6 +147,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const remoteVersion = useRef(0);
   /** Increases with each openDocument call, so an older call does not win. */
   const openRequest = useRef(0);
+  /** True while an editor shows the open document. Only then the editor owns its text. */
+  const editorAttached = useRef(false);
+  /** Other ids of documents (for example URL ids in links), by `connId:ref`. */
+  const aliases = useRef(new Map<string, string>());
 
   const lookup = useCallback((connId: string): [ConnectionInfo, Connector] => {
     const conn = connectionsRef.current.find((c) => c.id === connId);
@@ -268,6 +272,20 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     [expanded, loadSpaces, loadDocuments],
   );
 
+  /** True when a mounted editor has the newest text of this document. */
+  const ownsText = useCallback((key: string) => {
+    const current = activeRef.current;
+    return editorAttached.current && current?.key === key && current.content !== null;
+  }, []);
+
+  /** Unsaved local text: queued, or in the write that runs now. */
+  const localDraft = useCallback(
+    (key: string) =>
+      pendingWrites.current.get(key) ??
+      (inFlight.current?.key === key ? inFlight.current.content : undefined),
+    [],
+  );
+
   /**
    * Record a newer server version. The open document gets it in the editor,
    * which merges it into its own text and then calls `remoteApplied`. A closed
@@ -276,7 +294,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const offerRemote = useCallback(
     (key: string, entry: DocumentEntry, base: RemoteDocument, remote: RemoteDocument) => {
       entry.incoming = { base: entry.incoming?.base ?? base, remote };
-      if (activeRef.current?.key !== key) return;
+      if (!ownsText(key)) return;
       const incoming = entry.incoming;
       setActive((prev) =>
         prev?.key === key
@@ -294,7 +312,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
           : prev,
       );
     },
-    [],
+    [ownsText],
   );
 
   /**
@@ -313,6 +331,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     if (merged.conflict) toast.warning(CONFLICT_MESSAGE);
     return merged.text === remote ? null : merged.text;
   }, []);
+
 
   const updateTreeTitle = useCallback((connId: string, docId: string, title: string) => {
     const rename = (nodes: TreeNode[]): TreeNode[] =>
@@ -365,14 +384,14 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         if (result.remote.title !== result.base.title) {
           updateTreeTitle(entry.conn.id, result.remote.id, result.remote.title);
         }
-        // A closed document: merge and write again. A newer queued text wins.
-        if (activeRef.current?.key !== key && !pendingWrites.current.has(key)) {
+        // No editor has this text: merge and write again. A newer queued text wins.
+        if (!ownsText(key) && !pendingWrites.current.has(key)) {
           pendingWrites.current.set(key, local);
         }
       }
       setError(entry.conn.id, null);
     },
-    [mergeIncoming, offerRemote, setError, updateTreeTitle],
+    [mergeIncoming, offerRemote, ownsText, setError, updateTreeTitle],
   );
 
   /**
@@ -383,8 +402,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const runWrites = useCallback(async () => {
     if (writing.current) return;
     writing.current = true;
-    const waitsForEditor = (key: string) =>
-      Boolean(bases.current.get(key)?.incoming) && activeRef.current?.key === key;
+    const waitsForEditor = (key: string) => Boolean(bases.current.get(key)?.incoming) && ownsText(key);
     try {
       for (;;) {
         const key = [...pendingWrites.current.keys()].find((k) => !waitsForEditor(k));
@@ -418,7 +436,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     } finally {
       writing.current = false;
     }
-  }, [writeOne, setError]);
+  }, [writeOne, ownsText, setError]);
   const runWritesRef = useRef(runWrites);
   runWritesRef.current = runWrites;
 
@@ -443,11 +461,72 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     void runWritesRef.current();
   }, []);
 
+  /** The text to show for a document: its unsaved local text, merged with a newer version. */
+  const textToShow = useCallback(
+    (key: string): string => {
+      const entry = bases.current.get(key)!;
+      let draft = localDraft(key);
+      if (entry.incoming) {
+        if (draft === undefined) {
+          entry.doc = entry.incoming.remote;
+          entry.incoming = undefined;
+        } else {
+          const merged = mergeIncoming(entry, draft);
+          if (merged === null) pendingWrites.current.delete(key);
+          else pendingWrites.current.set(key, merged);
+          draft = merged ?? undefined;
+          void runWritesRef.current();
+        }
+      }
+      return draft ?? fullMarkdown(entry.doc);
+    },
+    [localDraft, mergeIncoming],
+  );
+
+  /**
+   * An editor shows the open document. When it goes (for example to Settings),
+   * the context owns the text again, so the stored content stays current.
+   */
+  const attachEditor = useCallback(() => {
+    editorAttached.current = true;
+    const current = activeRef.current;
+    if (current?.content != null && bases.current.has(current.key)) {
+      const text = textToShow(current.key);
+      if (text !== current.content) {
+        // The text changed while no editor showed it: load the new text
+        setActive((prev) =>
+          prev?.key === current.key
+            ? { ...prev, content: text, reloadVersion: prev.reloadVersion + 1 }
+            : prev,
+        );
+      }
+    }
+    return () => {
+      editorAttached.current = false;
+      // After the editor's last save, which runs in the same unmount
+      window.setTimeout(() => {
+        const active = activeRef.current;
+        if (active?.content != null && bases.current.has(active.key) && !editorAttached.current) {
+          const text = textToShow(active.key);
+          setActive((prev) => (prev?.key === active.key ? { ...prev, content: text } : prev));
+        }
+        void runWritesRef.current();
+      }, 0);
+    };
+  }, [textToShow]);
+
+  // Writes that waited for the editor of a document continue when it closes
+  useEffect(() => {
+    void runWritesRef.current();
+  }, [active?.key]);
+
   const openDocument = useCallback(
-    async (connId: string, docRef: string) => {
+    async (connId: string, ref: string) => {
       const [conn, connector] = lookup(connId);
-      const current = activeRef.current;
-      if (current?.key === documentKey(connId, docRef) && current.content !== null) return;
+      const docRef = aliases.current.get(`${connId}:${ref}`) ?? ref;
+      const previous = activeRef.current;
+      if (previous?.key === documentKey(connId, docRef) && previous.content !== null) return;
+      const editorKey = editorAttached.current ? previous?.key : undefined;
       clearSelection();
       const request = ++openRequest.current;
       const loadingKey = documentKey(connId, docRef);
@@ -462,10 +541,6 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         reloadVersion: 0,
       });
       try {
-        // Unsaved local text (queued or being written) is shown instead of the server text
-        const localDraft = (key: string) =>
-          pendingWrites.current.get(key) ??
-          (inFlight.current?.key === key ? inFlight.current.content : undefined);
         const hasLocalState = (key: string) => {
           const entry = bases.current.get(key);
           return Boolean(entry && (entry.incoming || localDraft(key) !== undefined));
@@ -477,26 +552,30 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         } else {
           // docRef can be a URL id, so the entry key is known only after the read
           const fresh = await connector.read(conn, docRef);
+          const alias = connector.documentFromLink(conn, fresh.url);
+          if (alias) aliases.current.set(`${connId}:${alias}`, fresh.id);
           const freshKey = documentKey(connId, fresh.id);
-          if (!hasLocalState(freshKey)) bases.current.set(freshKey, { conn, doc: fresh });
+          const known = bases.current.get(freshKey);
+          if (freshKey === editorKey && known && previous) {
+            // The document in the editor, opened by another id: keep the editor
+            // text and let the editor merge the newer version
+            if (request !== openRequest.current) return;
+            setActive(previous);
+            if (fresh.revision > known.doc.revision && !known.incoming) {
+              window.setTimeout(() => offerRemote(freshKey, known, known.doc, fresh), 0);
+            }
+            return;
+          }
+          if (!known) bases.current.set(freshKey, { conn, doc: fresh });
+          else if (!hasLocalState(freshKey)) known.doc = fresh;
+          else if (fresh.revision > known.doc.revision && !known.incoming) {
+            known.incoming = { base: known.doc, remote: fresh };
+          }
           doc = bases.current.get(freshKey)!.doc;
         }
         const entryKey = documentKey(connId, doc.id);
-        const entry = bases.current.get(entryKey)!;
-        let draft = localDraft(entryKey);
-        if (entry.incoming) {
-          if (draft === undefined) {
-            entry.doc = entry.incoming.remote;
-            entry.incoming = undefined;
-          } else {
-            const merged = mergeIncoming(entry, draft);
-            if (merged === null) pendingWrites.current.delete(entryKey);
-            else pendingWrites.current.set(entryKey, merged);
-            draft = merged ?? undefined;
-            void runWritesRef.current();
-          }
-          doc = entry.doc;
-        }
+        const content = textToShow(entryKey);
+        doc = bases.current.get(entryKey)!.doc;
         const key = documentKey(connId, doc.id);
         if (request !== openRequest.current) return;
         setActive({
@@ -504,7 +583,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
           docId: doc.id,
           key,
           title: doc.title,
-          content: draft ?? fullMarkdown(doc),
+          content,
           revision: doc.revision,
           updatedAt: doc.updatedAt,
           reloadVersion: 0,
@@ -528,7 +607,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         setActive(null);
       }
     },
-    [lookup, clearSelection, loadDocuments, mergeIncoming],
+    [lookup, clearSelection, loadDocuments, localDraft, offerRemote, textToShow],
   );
 
   const reloadActive = useCallback(async () => {
@@ -564,7 +643,11 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       if (document.visibilityState !== "visible") return;
       const entry = bases.current.get(activeKey);
       const connector = entry && getConnector(entry.conn.kind);
-      const busy = () => writing.current || pendingWrites.current.size > 0 || Boolean(entry?.incoming);
+      const busy = () =>
+        !editorAttached.current ||
+        writing.current ||
+        pendingWrites.current.size > 0 ||
+        Boolean(entry?.incoming);
       if (!entry || !connector || busy()) return;
       try {
         const remote = await connector.read(entry.conn, entry.doc.id);
@@ -756,6 +839,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       onCodec: (codec) => codecs.current.set(conn.id, codec),
       remoteUpdate: active.remoteUpdate,
       onRemoteApplied: remoteApplied,
+      attach: attachEditor,
       uploadImage: (file, name) => connector.uploadImage(conn, active.docId, file, name),
       openLink: (href) => {
         const ref = connector.documentFromLink(conn, href);
@@ -770,7 +854,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         return href.startsWith("mention://");
       },
     };
-  }, [active, connections, save, reloadActive, openDocument, remoteApplied]);
+  }, [active, connections, save, reloadActive, openDocument, remoteApplied, attachEditor]);
 
   const value = useMemo<ConnectionsContextValue>(
     () => ({

@@ -468,6 +468,8 @@ export interface PreviewModeData {
   remoteUpdate?: { version: number; base: string; remote: string };
   /** Called after the editor merged `remoteUpdate` into its text. */
   onRemoteApplied?: (version: number) => void;
+  /** Called when the editor mounts; the returned function when it unmounts. */
+  attach?: () => () => void;
   /** Uploads an image and returns the source to put in the document. */
   uploadImage?: (file: Blob, name: string) => Promise<string>;
   /** Opens a link. Returns false to use the default behavior. */
@@ -1364,6 +1366,9 @@ export function Editor({
     onEditorReady?.(editor);
   }, [editor, onEditorReady]);
 
+  // Tell the document source that this editor shows its text
+  useEffect(() => previewModeRef.current?.attach?.(), []);
+
   // Give a connection the markdown functions of this editor
   useEffect(() => {
     const manager = editor?.storage.markdown?.manager;
@@ -1580,6 +1585,14 @@ export function Editor({
         clearTimeout(sourceTimeoutRef.current);
         sourceTimeoutRef.current = null;
       }
+      // Save source text that waits for the auto-save delay, to the note it belongs to
+      const source = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (source) {
+        saveNote(source.content, source.noteId).catch((error) =>
+          console.error("Failed to save note:", error),
+        );
+      }
     }
     // Check if this is a manual reload (user clicked Refresh button or pressed Cmd+R)
     const isManualReload = reloadVersion !== lastReloadVersionRef.current;
@@ -1674,6 +1687,7 @@ export function Editor({
     currentNote,
     editor,
     flushPendingSave,
+    saveNote,
     reloadVersion,
     consumePendingNewNote,
   ]);

@@ -209,17 +209,20 @@ function escapeText(text: string, startOfLine: boolean, inTable: boolean): strin
     .replace(/={2,}/g, (run) => run.replace(/=/g, "\\="));
   out = out
     .split("\n")
-    .map((line) => {
+    .map((line, index) => {
       const last = line.lastIndexOf("](");
-      return last === -1 ? line : line.slice(0, last).replace(/\[/g, "\\$&") + line.slice(last);
+      let result =
+        last === -1 ? line : line.slice(0, last).replace(/\[/g, "\\$&") + line.slice(last);
+      // Every line after a newline starts a line, as does the first if startOfLine
+      if (index > 0 || startOfLine) {
+        result = result
+          .replace(/^[:#\-*+>]/, "\\$&")
+          .replace(/^(\d+)\.(?=\s|$)/, "$1\\.")
+          .replace(/^([a-z])\.(?=\s)/i, "$1\\.");
+      }
+      return result;
     })
     .join("\n");
-  if (startOfLine) {
-    out = out
-      .replace(/^[:#\-*+>]/, "\\$&")
-      .replace(/^(\d+)\.(?=\s|$)/, "$1\\.")
-      .replace(/^([a-z])\.(?=\s)/i, "$1\\.");
-  }
   if (inTable) out = out.replace(/\|/g, "\\$&");
   return out;
 }

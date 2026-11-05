@@ -71,6 +71,14 @@ describe("Outline dialect", () => {
     }
   });
 
+  it("keeps line-start characters literal after a newline in the text", () => {
+    const once = codec.serialize(codec.parse("first line\n\\> not a quote\n\\# not a heading"));
+    const doc = codec.parse(once);
+    expect(findNodes(doc, "blockquote")).toHaveLength(0);
+    expect(findNodes(doc, "heading")).toHaveLength(0);
+    expect(codec.serialize(doc)).toBe(once);
+  });
+
   it("is stable after one round trip", () => {
     const once = roundTrip(kitchenSink);
     expect(roundTrip(once)).toBe(once);
