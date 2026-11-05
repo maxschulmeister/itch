@@ -55,11 +55,14 @@ To add a connector, add a folder `src/connections/<kind>/` that implements `Conn
 1. itch shows a document as `# Title` + body. On save, the first H1 becomes the title.
 2. itch never sends the full body. It compares the base text from Outline with the new text, block by block. For each changed block, it sends one `patch` with the original Outline text of that block as `findText`. Unchanged blocks are not touched, so data that markdown cannot carry (comment anchors) stays.
 3. Each write sends `lastRevision`. On `409`, itch reads the latest version, merges (base, mine, theirs), and tries again.
+4. If Outline does not find a patch block (Outline cloud answers `404`, the open-source server `400`), itch sends the full text, still with `lastRevision`.
+5. Writes for one document run one at a time. A network failure keeps the edit and tries again after 5 s. A `404` or `403` on the full text drops the write and tells the user.
 
 ### Remote changes
 
-- The open document: `documents.info` every 4 s. If the revision changed, the editor merges the remote text into its current text and keeps the cursor.
+- The open document: `documents.info` every 4 s while the window is visible, and at once when it shows again. If the revision changed, the editor merges the remote text into its current text and keeps the cursor. Remote changes are not added to the undo history.
 - Tree: `collections.documents` every 45 s for expanded collections.
+- When both sides changed the same words, the local words stay, itch shows a message, and the other version stays in the Outline history.
 - Outline sends API edits to open web editors at once (`APIUpdateExtension`), so itch edits show live in the web app.
 
 ### Markdown dialect
@@ -72,6 +75,19 @@ Live co-editing (Y.js) needs a session token. Outline does not give it to API ke
 
 ## Decisions
 
-- Connection folders show at the top of the sidebar list, in a separate tree component. Arrow keys work inside each tree. The local tree is not changed.
-- The editor remounts when the source changes (local ↔ connection), because the extension set changes.
+- Connection folders show at the top of the sidebar list, in a separate tree component (`ConnectionsTree`). Arrow keys work inside each tree; Tab moves between them. The local tree is not changed.
+- A document opens in the same editor as local notes, through the `previewMode` document source. The editor remounts when the source changes (local ↔ connection), because the extension set changes.
+- The dialect has its own `Marked` instance, so Outline syntax (for example `__underline__`) does not change how local notes are read.
+- New documents are published at once, as the Outline web app does inside a collection.
 - Out of scope for v1: drag between local and a connection, live cursors, comments UI, OAuth, offline editing beyond "no lost edits".
+
+## Tests
+
+- `npm test`: dialect round trips (`outline/dialect.test.ts`), block patches (`outline/patch.test.ts`), 3-way merge (`merge.test.ts`).
+- Contract test against a real workspace (creates and deletes documents, so use a test workspace):
+
+  ```bash
+  OUTLINE_TEST_URL=https://<team>.getoutline.com OUTLINE_TEST_API_KEY=ol_api_… npm test
+  ```
+
+- `cargo test connections`: base URL rules and which URLs get the token.
