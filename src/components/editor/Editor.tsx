@@ -470,6 +470,8 @@ export interface PreviewModeData {
   onRemoteApplied?: (version: number) => void;
   /** Called when the editor mounts; the returned function when it unmounts. */
   attach?: () => () => void;
+  /** True while the source still writes this document (for the save indicator). */
+  saving?: boolean;
   /** Gives the source a function that saves the edits waiting for the auto-save delay. */
   registerSaveFlush?: (flush: () => Promise<void>) => () => void;
   /** Uploads an image and returns the source to put in the document. */
@@ -2115,6 +2117,8 @@ export function Editor({
 
     if (!sourceMode) {
       // === Entering source mode (TipTap → textarea) ===
+      // Save waiting editor text now, so it cannot follow (and replace) newer source text
+      void flushPendingSave();
       const md = getMarkdown(editor);
 
       // Find which top-level block is at the viewport top
@@ -2179,6 +2183,19 @@ export function Editor({
 
       sourceModeTransitionRef.current = { topBlockIndex, cursorBlockIndex };
 
+      // Save waiting source text now, before the editor takes over
+      if (sourceTimeoutRef.current) {
+        clearTimeout(sourceTimeoutRef.current);
+        sourceTimeoutRef.current = null;
+      }
+      const pendingSource = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (pendingSource) {
+        saveNote(pendingSource.content, pendingSource.noteId).catch((error) =>
+          console.error("Failed to save note:", error),
+        );
+      }
+
       // Parse and set content
       const manager = editor.storage.markdown?.manager;
       if (manager) {
@@ -2193,7 +2210,7 @@ export function Editor({
       }
       setSourceMode(false);
     }
-  }, [editor, sourceMode, sourceContent, getMarkdown]);
+  }, [editor, sourceMode, sourceContent, getMarkdown, flushPendingSave, saveNote]);
 
   // Restore focus and scroll position after source mode transitions.
   // useLayoutEffect runs synchronously after React commits DOM changes,
@@ -2478,7 +2495,7 @@ export function Editor({
                 <span>Refresh</span>
               </button>
             </Tooltip>
-          ) : isSaving ? (
+          ) : isSaving || previewMode?.saving ? (
             <Tooltip content="Saving...">
               <div className="h-7 w-7 flex items-center justify-center">
                 <SpinnerIcon className="w-4.5 h-4.5 text-text-muted/40 stroke-[1.5] animate-spin" />

@@ -56,7 +56,7 @@ To add a connector, add a folder `src/connections/<kind>/` that implements `Conn
 2. itch never sends the full body. It compares the base text from Outline with the new text, block by block. For each changed block, it sends one `patch` with the original Outline text of that block as `findText`. Unchanged blocks are not touched, so data that markdown cannot carry (comment anchors) stays.
 3. Each write sends `lastRevision`. On `409`, itch reads the latest version, merges (base, mine, theirs), and tries again.
 4. If Outline does not find a patch block (Outline cloud answers `404`, the open-source server `400`), itch sends the full text, still with `lastRevision`.
-5. Writes run one at a time in the background; the editor only queues its text. Before another document opens, the editor queues its waiting text (`registerSaveFlush`). A network failure keeps the edit and tries again after 5 s, while other documents still save. A `404` or `403` on the full text drops the write and tells the user. Removing a connection drops its queued writes.
+5. Writes run one at a time in the background; the editor only queues its text. Before another document opens, the editor queues its waiting text (`registerSaveFlush`); a switch between the editor and the source view also queues the waiting text of the view it leaves, so an older text cannot follow a newer one. The save indicator stays on while a write for the document is queued or running. A network failure keeps the edit and tries again after 5 s, while other documents still save. A `404` or `403` on the full text drops the write and tells the user. Removing a connection drops its queued writes.
 
 ### Remote changes
 

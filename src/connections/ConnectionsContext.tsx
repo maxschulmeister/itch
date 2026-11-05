@@ -144,6 +144,15 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   /** Edits that wait to be written, by document key. */
   const pendingWrites = useRef(new Map<string, string>());
   const writing = useRef(false);
+  /** Documents with queued or running writes, for the save indicator. */
+  const [savingKeys, setSavingKeys] = useState<ReadonlySet<string>>(new Set());
+  const syncSaving = useCallback(() => {
+    const keys = new Set(pendingWrites.current.keys());
+    if (inFlight.current) keys.add(inFlight.current.key);
+    setSavingKeys((prev) =>
+      prev.size === keys.size && [...keys].every((key) => prev.has(key)) ? prev : keys,
+    );
+  }, []);
   const remoteVersion = useRef(0);
   /** Increases with each openDocument call, so an older call does not win. */
   const openRequest = useRef(0);
@@ -416,6 +425,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         const content = pendingWrites.current.get(key)!;
         pendingWrites.current.delete(key);
         inFlight.current = { key, content };
+        syncSaving();
         try {
           await writeOne(key, content);
         } catch (error) {
@@ -441,9 +451,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       }
     } finally {
       writing.current = false;
+      syncSaving();
     }
     if (failed.size > 0) window.setTimeout(() => void runWritesRef.current(), RETRY_MS);
-  }, [writeOne, ownsText, setError]);
+  }, [writeOne, ownsText, setError, syncSaving]);
   const runWritesRef = useRef(runWrites);
   runWritesRef.current = runWrites;
 
@@ -451,9 +462,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const save = useCallback(
     async (key: string, content: string) => {
       pendingWrites.current.set(key, content);
+      syncSaving();
       void runWrites();
     },
-    [runWrites],
+    [runWrites, syncSaving],
   );
 
   const registerSaveFlush = useCallback((flush: () => Promise<void>) => {
@@ -473,6 +485,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     entry.incoming = undefined;
     // Older queued texts are part of the editor text, which the editor saves next
     pendingWrites.current.delete(current.key);
+    syncSaving();
     // A new editor (after Settings) must not apply this version again
     setActive((prev) =>
       prev?.key === current.key && prev.remoteUpdate?.version === version
@@ -480,7 +493,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         : prev,
     );
     void runWritesRef.current();
-  }, []);
+  }, [syncSaving]);
 
   /** The text to show for a document: its unsaved local text, merged with a newer version. */
   const textToShow = useCallback(
@@ -554,11 +567,12 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       const docRef = aliases.current.get(`${connId}:${ref}`) ?? ref;
       const previous = activeRef.current;
       if (previous?.key === documentKey(connId, docRef) && previous.content !== null) return;
+      const request = ++openRequest.current;
       // Queue the text of the document that the editor leaves, before writes for it continue
       if (editorAttached.current) await editorFlush.current?.();
+      if (request !== openRequest.current) return;
       const editorKey = editorAttached.current ? previous?.key : undefined;
       clearSelection();
-      const request = ++openRequest.current;
       const loadingKey = documentKey(connId, docRef);
       setActive({
         connId,
@@ -739,9 +753,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       }
       codecs.current.delete(id);
       setError(id, null);
+      syncSaving();
       await reloadConnections();
     },
-    [reloadConnections, setError],
+    [reloadConnections, setError, syncSaving],
   );
 
   const refresh = useCallback((connId: string) => refreshTrees(connId), [refreshTrees]);
@@ -818,10 +833,11 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       const key = documentKey(connId, docId);
       pendingWrites.current.delete(key);
       bases.current.delete(key);
+      syncSaving();
       if (activeRef.current?.key === key) setActive(null);
       await refreshTrees(connId);
     },
-    [lookup, refreshTrees],
+    [lookup, refreshTrees, syncSaving],
   );
 
   const openInBrowser = useCallback(
@@ -884,6 +900,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       onRemoteApplied: remoteApplied,
       attach: attachEditor,
       registerSaveFlush,
+      saving: savingKeys.has(active.key),
       uploadImage: (file, name) => connector.uploadImage(conn, active.docId, file, name),
       openLink: (href) => {
         const ref = connector.documentFromLink(conn, href);
@@ -907,6 +924,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     remoteApplied,
     attachEditor,
     registerSaveFlush,
+    savingKeys,
   ]);
 
   const value = useMemo<ConnectionsContextValue>(
