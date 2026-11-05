@@ -16,6 +16,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+mod connections;
 mod git;
 mod ai;
 mod storage;
@@ -3259,6 +3260,10 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .register_asynchronous_uri_scheme_protocol(
+            connections::ASSET_PROTOCOL,
+            connections::handle_asset_request,
+        )
         .setup(|app| {
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
@@ -3432,6 +3437,12 @@ pub fn run() {
             uninstall_cli,
             get_cli_status,
             set_title_bar_theme,
+            connections::connections_list,
+            connections::connections_add,
+            connections::connections_rename,
+            connections::connections_remove,
+            connections::connection_request,
+            connections::connection_upload,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");
