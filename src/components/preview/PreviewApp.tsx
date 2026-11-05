@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { message } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { Editor, type PreviewModeData } from "../editor/Editor";
 import { openSettingsWindow } from "../../services/settings";
@@ -9,9 +10,32 @@ import { getNotesFolder } from "../../services/notes";
 
 interface PreviewAppProps {
   filePath: string;
+  /** The file is a new file in the app data that the user did not save yet. */
+  untitled: boolean;
 }
 
-export function PreviewApp({ filePath }: PreviewAppProps) {
+const SAVE = "Save…";
+const DONT_SAVE = "Don’t Save";
+
+export function PreviewApp({
+  filePath: initialPath,
+  untitled,
+}: PreviewAppProps) {
+  // An untitled file moves to a new path when the user saves it
+  const [filePath, setFilePath] = useState(initialPath);
+  const filePathRef = useRef(filePath);
+  filePathRef.current = filePath;
+  const untitledRef = useRef(untitled);
+  // The file as the last load or save left it, for the close question
+  const savedRef = useRef({ content: "", title: "" });
+  // Saves the edits that wait for the auto-save delay
+  const flushRef = useRef(async () => {});
+  const registerSaveFlush = useCallback((flush: () => Promise<void>) => {
+    flushRef.current = flush;
+    return () => {
+      if (flushRef.current === flush) flushRef.current = async () => {};
+    };
+  }, []);
   const [content, setContent] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [modified, setModified] = useState(0);
@@ -25,6 +49,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     filesService
       .readFileDirect(filePath)
       .then((result) => {
+        savedRef.current = result;
         setContent(result.content);
         setTitle(result.title);
         setModified(result.modified);
@@ -60,6 +85,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     async (newContent: string) => {
       try {
         const result = await filesService.saveFileDirect(filePath, newContent);
+        savedRef.current = result;
         recentlySavedRef.current = true;
         setModified(result.modified);
         setTitle(result.title);
@@ -75,6 +101,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
   const reload = useCallback(async () => {
     try {
       const result = await filesService.readFileDirect(filePath);
+      savedRef.current = result;
       setContent(result.content);
       setTitle(result.title);
       setModified(result.modified);
@@ -85,6 +112,78 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
       toast.error(`Failed to reload: ${error}`);
     }
   }, [filePath]);
+
+  // Ask where to save an untitled file and move it there. Returns false when
+  // the user cancels.
+  const saveUntitled = useCallback(async () => {
+    await flushRef.current();
+    const result = await filesService.saveUntitledFileWithDialog(
+      filePathRef.current,
+      savedRef.current.title,
+    );
+    if (!result) return false;
+    untitledRef.current = false;
+    savedRef.current = result;
+    setFilePath(result.path);
+    setContent(result.content);
+    setTitle(result.title);
+    setModified(result.modified);
+    return true;
+  }, []);
+
+  // Cmd+S and File > Save: the edits save automatically, so only an untitled
+  // file needs a place
+  const saveFile = useCallback(() => {
+    const done = untitledRef.current ? saveUntitled() : flushRef.current();
+    done.catch((error) => {
+      console.error("Failed to save file:", error);
+      toast.error(`Failed to save: ${error}`);
+    });
+  }, [saveUntitled]);
+
+  useEffect(() => {
+    const unlisten = listen("save-file", saveFile);
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [saveFile]);
+
+  // Save the edits before the window closes. Ask what to do with an untitled
+  // file that has text; an empty one is deleted.
+  useEffect(() => {
+    const unlisten = getCurrentWindow().onCloseRequested(async (event) => {
+      try {
+        await flushRef.current();
+        if (!untitledRef.current) return;
+        const path = filePathRef.current;
+        if (savedRef.current.content.trim() === "") {
+          await filesService.discardUntitledFile(path);
+          return;
+        }
+        const choice = await message(
+          "Your changes will be lost if you don’t save them.",
+          {
+            title: `Do you want to save “${savedRef.current.title}”?`,
+            kind: "warning",
+            buttons: { yes: SAVE, no: DONT_SAVE, cancel: "Cancel" },
+          },
+        );
+        if (choice === DONT_SAVE) {
+          await filesService.discardUntitledFile(path);
+          return;
+        }
+        if (choice === SAVE && (await saveUntitled())) return;
+      } catch (error) {
+        console.error("Failed to save file:", error);
+        toast.error(`Failed to save: ${error}`);
+      }
+      event.preventDefault();
+      await filesService.cancelQuit();
+    });
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [saveUntitled]);
 
   // Listen for preview-file-change events
   useEffect(() => {
@@ -131,10 +230,17 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
       // Cmd+N: New file
       if (modKey && !e.shiftKey && e.key.toLowerCase() === "n") {
         e.preventDefault();
-        filesService.createFileWithDialog().catch((err) => {
+        filesService.createUntitledFile().catch((err) => {
           console.error("Failed to create file:", err);
           toast.error("Failed to create file");
         });
+        return;
+      }
+
+      // Cmd+S: Save
+      if (modKey && !e.shiftKey && e.key.toLowerCase() === "s") {
+        e.preventDefault();
+        saveFile();
         return;
       }
 
@@ -164,7 +270,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
 
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [focusMode, reload]);
+  }, [focusMode, reload, saveFile]);
 
   // "Save to folder" needs a library; check again on focus, because it can change
   const [hasLibrary, setHasLibrary] = useState(false);
@@ -187,7 +293,13 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     savingRef.current = true;
     setIsSaving(true);
     try {
+      await flushRef.current();
       await filesService.importFileToFolder(filePath);
+      // The library has a copy now, so the untitled file is not needed
+      if (untitledRef.current) {
+        await filesService.discardUntitledFile(filePath);
+        untitledRef.current = false;
+      }
       // Backend emits select-note + focuses main window; close this preview
       await getCurrentWindow().close();
     } catch (error) {
@@ -208,6 +320,7 @@ export function PreviewApp({ filePath }: PreviewAppProps) {
     reloadVersion,
     save,
     reload,
+    registerSaveFlush,
   };
 
   return (

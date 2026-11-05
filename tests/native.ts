@@ -3,6 +3,7 @@ import { expect, type Page } from "@playwright/test";
 
 export const FILE_PATH = "/tmp/note.md";
 export const FILE_TEXT = "Text from the standalone file.";
+export const UNTITLED_PATH = "/app-data/untitled/Untitled.md";
 
 // The official Tauri IPC mock (mockIPC/mockWindows), as a classic script so it
 // runs before the app.
@@ -31,8 +32,16 @@ export class Native {
   notes: Record<string, string> = {};
   /** The path that the user selects in the native save dialog. */
   pathToSave: string | null = null;
-  /** The paths of the `create_file` calls. */
-  createdFiles: string[] = [];
+  /** The options of the native save dialogs. */
+  saveDialogs: Args[] = [];
+  /** The button that the user selects in the native message dialog. */
+  messageReply = "Cancel";
+  /** The options of the native message dialogs. */
+  messages: Args[] = [];
+  /** The args of the `save_untitled_file` calls. */
+  savedUntitled: Args[] = [];
+  /** The paths of the `discard_untitled_file` calls. */
+  discarded: string[] = [];
   /** The folder that the user selects in the native folder dialog. */
   folderToChoose: string | null = null;
   /** When set, the native Settings window does not open, with this error. */
@@ -79,6 +88,17 @@ export class Native {
     await page.goto(url);
   }
 
+  /** Opens a new untitled file window, with an empty file. */
+  async openUntitledWindow(page: Page) {
+    this.file = { path: UNTITLED_PATH, content: "", title: "Untitled", modified: 1 };
+    await this.open(
+      page,
+      `/?mode=preview&file=${encodeURIComponent(UNTITLED_PATH)}&untitled=1`,
+      "preview-untitled-1",
+    );
+    await expect(page.locator(".ProseMirror")).toBeVisible();
+  }
+
   async openFileWindow(page: Page) {
     await this.open(page, `/?mode=preview&file=${encodeURIComponent(FILE_PATH)}`, "preview");
     await expect(page.locator(".ProseMirror")).toContainText(FILE_TEXT);
@@ -121,7 +141,13 @@ export class Native {
       case "read_file_direct":
         return structuredClone(this.file);
       case "save_file_direct":
-        this.file = { ...this.file, content: args.content, modified: this.file.modified + 1 };
+        this.file = {
+          ...this.file,
+          content: args.content,
+          // Like the backend: the first line without the heading mark.
+          title: args.content.trim().split("\n")[0].replace(/^# /, "") || "Untitled",
+          modified: this.file.modified + 1,
+        };
         return structuredClone(this.file);
       case "get_settings":
         return this.settingsLoaded.then(() => structuredClone(this.settings));
@@ -146,9 +172,24 @@ export class Native {
       case "get_default_ignored_patterns":
         return ["node_modules", ".git"];
       case "plugin:dialog|save":
+        this.saveDialogs.push(args.options);
         return this.pathToSave;
-      case "create_file":
-        this.createdFiles.push(args.path);
+      case "plugin:dialog|message":
+        this.messages.push(args);
+        return this.messageReply;
+      case "create_untitled_file":
+      case "cancel_quit":
+        return null;
+      case "save_untitled_file":
+        this.savedUntitled.push(args);
+        this.file = { ...this.file, path: args.path, modified: this.file.modified + 1 };
+        return structuredClone(this.file);
+      case "discard_untitled_file":
+        this.discarded.push(args.path);
+        return null;
+      case "plugin:window|close":
+        // Tauri asks the window before it closes it.
+        setTimeout(this.broadcast.bind(this), 0, "tauri://close-requested", null, this.labels.get(page));
         return null;
       case "open_folder_dialog":
         return this.folderToChoose;

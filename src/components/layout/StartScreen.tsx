@@ -48,7 +48,7 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
 
   const handleNewFile = async () => {
     try {
-      await filesService.createFileWithDialog();
+      await filesService.createUntitledFile();
     } catch (err) {
       console.error("Failed to create file:", err);
       toast.error("Failed to create file");
@@ -110,7 +110,7 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
               size="xl"
               title={`New File (${shortcut(mod, "N")})`}
             >
-              New File…
+              New File
             </Button>
             <Button
               onClick={handleOpenFile}

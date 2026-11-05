@@ -16,6 +16,7 @@ import { SpinnerIcon } from "./components/icons";
 import { KeyboardShortcutsModal } from "./components/shortcuts/KeyboardShortcutsModal";
 import { PreviewApp } from "./components/preview/PreviewApp";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { listen } from "@tauri-apps/api/event";
 import * as filesService from "./services/files";
 import { openSettingsWindow } from "./services/settings";
 import { isMac, isWindows } from "./lib/platform";
@@ -25,6 +26,7 @@ function getWindowMode(): {
   isSettings: boolean;
   isPreview: boolean;
   previewFile: string | null;
+  untitled: boolean;
 } {
   const params = new URLSearchParams(window.location.search);
   const mode = params.get("mode");
@@ -33,6 +35,7 @@ function getWindowMode(): {
     isSettings: mode === "settings",
     isPreview: mode === "preview" && !!file,
     previewFile: file,
+    untitled: params.has("untitled"),
   };
 }
 
@@ -78,6 +81,14 @@ function AppContent() {
   const displayItems = useMemo(() => {
     return searchQuery.trim() ? searchResults : notes;
   }, [searchQuery, searchResults, notes]);
+
+  // File > New File creates a note when the library window has the focus
+  useEffect(() => {
+    const unlisten = listen("new-note", () => createNote());
+    return () => {
+      unlisten.then((fn) => fn());
+    };
+  }, [createNote]);
 
   // Global keyboard shortcuts
   useEffect(() => {
@@ -172,7 +183,7 @@ function AppContent() {
         if (notesFolder) {
           createNote();
         } else {
-          filesService.createFileWithDialog().catch((err) => {
+          filesService.createUntitledFile().catch((err) => {
             console.error("Failed to create file:", err);
             toast.error("Failed to create file");
           });
@@ -395,7 +406,10 @@ function ZoomShortcuts() {
 }
 
 function App() {
-  const { isSettings, isPreview, previewFile } = useMemo(getWindowMode, []);
+  const { isSettings, isPreview, previewFile, untitled } = useMemo(
+    getWindowMode,
+    [],
+  );
 
   // Shortcuts shared by the library, file and Settings windows.
   useEffect(() => {
@@ -432,7 +446,10 @@ function App() {
       <TooltipProvider>
         <ZoomShortcuts />
         {isPreview && previewFile ? (
-          <PreviewApp filePath={decodeURIComponent(previewFile)} />
+          <PreviewApp
+            filePath={decodeURIComponent(previewFile)}
+            untitled={untitled}
+          />
         ) : (
           <NotesProvider settingsWindow={isSettings}>
             <GitProvider background={!isSettings}>

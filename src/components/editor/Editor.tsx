@@ -454,6 +454,7 @@ export interface PreviewModeData {
   reloadVersion: number;
   save: (content: string) => Promise<void>;
   reload: () => Promise<void>;
+  registerSaveFlush: (flush: () => Promise<void>) => () => void;
 }
 
 interface EditorProps {
@@ -1629,7 +1630,9 @@ export function Editor({
   const flushAllSavesRef = useRef(flushAllSaves);
   flushAllSavesRef.current = flushAllSaves;
 
-  const registerSaveFlush = notesCtx?.registerSaveFlush;
+  const registerSaveFlush = previewMode
+    ? previewMode.registerSaveFlush
+    : notesCtx?.registerSaveFlush;
   useEffect(
     () => registerSaveFlush?.(flushAllSaves),
     [registerSaveFlush, flushAllSaves],

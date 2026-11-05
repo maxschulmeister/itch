@@ -4,6 +4,7 @@ use notify::{Config, RecommendedWatcher, RecursiveMode, Watcher};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant};
 use tantivy::collector::TopDocs;
@@ -3063,21 +3064,35 @@ fn create_preview_window<R: tauri::Runtime>(
         return Ok(());
     }
 
+    build_file_window(app, &label, file_path, false)
+}
+
+/// Build a file window. An untitled file shows its name without the extension, like
+/// "Untitled", and the frontend asks where to save it.
+fn build_file_window<R: tauri::Runtime>(
+    app: &AppHandle<R>,
+    label: &str,
+    file_path: &str,
+    untitled: bool,
+) -> Result<(), String> {
     // Extract filename for the window title
-    let filename = PathBuf::from(file_path)
-        .file_name()
+    let path = Path::new(file_path);
+    let filename = if untitled { path.file_stem() } else { path.file_name() }
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_else(|| "Preview".to_string());
 
     // Add the file's folder to asset protocol scope so relative images can be served
-    if let Some(folder) = Path::new(file_path).parent() {
+    if let Some(folder) = path.parent() {
         let _ = app.asset_protocol_scope().allow_directory(folder, true);
     }
 
     let encoded_path = urlencoding::encode(file_path);
-    let url = format!("index.html?mode=preview&file={}", encoded_path);
+    let mut url = format!("index.html?mode=preview&file={}", encoded_path);
+    if untitled {
+        url.push_str("&untitled");
+    }
 
-    let builder = WebviewWindowBuilder::new(app, &label, WebviewUrl::App(url.into()))
+    let builder = WebviewWindowBuilder::new(app, label, WebviewUrl::App(url.into()))
         .title(format!("{} — Itch", filename))
         .inner_size(800.0, 600.0)
         .min_inner_size(400.0, 300.0)
@@ -3177,20 +3192,27 @@ fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
         .map_err(|e| format!("Cannot resolve file path: {}", e))?;
     create_preview_window(app, &canonical.to_string_lossy())?;
     remember_recent_file(app, &canonical);
+    hide_start_screen(app);
+    Ok(true)
+}
 
-    let has_library = app
-        .state::<AppState>()
+fn has_library(app: &AppHandle) -> bool {
+    app.state::<AppState>()
         .app_config
         .read()
         .expect("app_config read lock")
         .notes_folder
-        .is_some();
-    if !has_library {
+        .is_some()
+}
+
+/// Without a library, the main window only shows the start screen: hide it when a file
+/// window opens.
+fn hide_start_screen(app: &AppHandle) {
+    if !has_library(app) {
         if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.hide();
         }
     }
-    Ok(true)
 }
 
 // Async: creating a window in a sync command can deadlock on Windows.
@@ -3205,8 +3227,8 @@ async fn open_file_preview(app: AppHandle, path: String) -> Result<(), String> {
     Ok(())
 }
 
-/// Write a new markdown file at a path from the save dialog. Returns the path of the file.
-async fn write_new_file(path: &Path) -> Result<PathBuf, String> {
+/// Write a markdown file at a path from the save dialog. Returns the path of the file.
+async fn write_markdown_file(path: &Path, content: &str) -> Result<PathBuf, String> {
     // The save dialog asked before it gave an existing path, so that file can be replaced.
     // Some Linux dialogs do not add the extension; the file with the added extension
     // was not confirmed, so it must not exist yet.
@@ -3219,10 +3241,6 @@ async fn write_new_file(path: &Path) -> Result<PathBuf, String> {
         PathBuf::from(with_extension)
     };
 
-    let title = file_path
-        .file_stem()
-        .and_then(|s| s.to_str())
-        .unwrap_or("Untitled");
     let mut options = fs::OpenOptions::new();
     options.write(true);
     if confirmed {
@@ -3234,18 +3252,205 @@ async fn write_new_file(path: &Path) -> Result<PathBuf, String> {
         .open(&file_path)
         .await
         .map_err(|e| format!("Cannot create file: {}", e))?;
-    file.write_all(format!("# {}\n\n", title).as_bytes())
+    file.write_all(content.as_bytes())
         .await
         .map_err(|e| format!("Cannot write file: {}", e))?;
     Ok(file_path)
 }
 
+// Untitled files: new files that the user did not save in a place yet. They stay in
+// the app data until the user saves or discards them.
+const UNTITLED_LABEL_PREFIX: &str = "preview-untitled-";
+
+/// The number of the last untitled window, for unique window labels.
+static UNTITLED_WINDOWS: AtomicU32 = AtomicU32::new(0);
+
+/// True while the app quits: it closes the untitled windows one by one, and each one
+/// can ask to save. The frontend calls `cancel_quit` when the user keeps one open.
+#[derive(Default)]
+struct Quitting(AtomicBool);
+
+fn untitled_dir(app: &AppHandle) -> Result<PathBuf, String> {
+    app.path()
+        .app_data_dir()
+        .map(|dir| dir.join("untitled"))
+        .map_err(|e| e.to_string())
+}
+
+/// Create an empty markdown file with a free name: "Untitled.md", "Untitled 2.md", ...
+fn create_untitled_in(dir: &Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(dir).map_err(|e| format!("Cannot create folder: {}", e))?;
+    let mut number = 1;
+    loop {
+        let name = match number {
+            1 => "Untitled.md".to_string(),
+            n => format!("Untitled {}.md", n),
+        };
+        let path = dir.join(name);
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => number += 1,
+            Err(e) => return Err(format!("Cannot create file: {}", e)),
+        }
+    }
+}
+
+/// The canonical path of a file in `dir`, or an error for a file in another folder.
+fn file_in_dir(dir: &Path, path: &str) -> Result<PathBuf, String> {
+    let file = Path::new(path)
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    let dir = dir
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve folder: {}", e))?;
+    if file.parent() == Some(dir.as_path()) {
+        Ok(file)
+    } else {
+        Err(format!("Not an untitled file: {}", path))
+    }
+}
+
+/// Create an untitled file and open it in a file window.
+fn open_untitled_file(app: &AppHandle) -> Result<(), String> {
+    let path = create_untitled_in(&untitled_dir(app)?)?;
+    let path = path
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    let number = UNTITLED_WINDOWS.fetch_add(1, Ordering::Relaxed) + 1;
+    let label = format!("{}{}", UNTITLED_LABEL_PREFIX, number);
+    build_file_window(app, &label, &path.to_string_lossy(), true)?;
+    hide_start_screen(app);
+    Ok(())
+}
+
 // Async: creating a window in a sync command can deadlock on Windows.
 #[tauri::command]
-async fn create_file(app: AppHandle, path: String) -> Result<(), String> {
-    let file_path = write_new_file(Path::new(&path)).await?;
-    open_markdown_file(&app, &file_path)?;
-    Ok(())
+async fn create_untitled_file(app: AppHandle) -> Result<(), String> {
+    open_untitled_file(&app)
+}
+
+/// Move an untitled file to a path from the save dialog. The window stays open and
+/// edits the file at its new path.
+#[tauri::command]
+async fn save_untitled_file(
+    app: AppHandle,
+    window: tauri::WebviewWindow,
+    source: String,
+    path: String,
+) -> Result<FileContent, String> {
+    let source = file_in_dir(&untitled_dir(&app)?, &source)?;
+    let content = fs::read_to_string(&source)
+        .await
+        .map_err(|e| format!("Cannot read file: {}", e))?;
+    let target = write_markdown_file(Path::new(&path), &content)
+        .await?
+        .canonicalize()
+        .map_err(|e| format!("Cannot resolve file path: {}", e))?;
+    // The user can select the untitled file itself in the save dialog
+    if target != source {
+        let _ = fs::remove_file(&source).await;
+    }
+
+    if let Some(folder) = target.parent() {
+        let _ = app.asset_protocol_scope().allow_directory(folder, true);
+    }
+    if let Some(name) = target.file_name() {
+        let _ = window.set_title(&format!("{} — Itch", name.to_string_lossy()));
+    }
+    remember_recent_file(&app, &target);
+    read_file_direct(target.to_string_lossy().into_owned()).await
+}
+
+/// Delete an untitled file that the user does not want to save.
+#[tauri::command]
+async fn discard_untitled_file(app: AppHandle, path: String) -> Result<(), String> {
+    let file = file_in_dir(&untitled_dir(&app)?, &path)?;
+    fs::remove_file(file)
+        .await
+        .map_err(|e| format!("Cannot delete file: {}", e))
+}
+
+#[tauri::command]
+fn cancel_quit(quitting: State<Quitting>) {
+    quitting.0.store(false, Ordering::SeqCst);
+}
+
+/// Close the next untitled window, so that it can ask to save, or quit when none is left.
+/// `closed` is the label of a window that is closing now.
+fn close_next_untitled_or_exit(app: &AppHandle, closed: &str) {
+    let next = app
+        .webview_windows()
+        .into_iter()
+        .find(|(label, _)| label.starts_with(UNTITLED_LABEL_PREFIX) && label != closed);
+    match next {
+        Some((_, window)) => {
+            let _ = window.set_focus();
+            let _ = window.close();
+        }
+        None => app.exit(0),
+    }
+}
+
+/// The app menu with File > New File and Save, and a Quit that asks about untitled files.
+#[cfg(target_os = "macos")]
+fn app_menu(app: &AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::Wry>> {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+
+    let menu = Menu::default(app)?;
+    let submenus: Vec<_> = menu
+        .items()?
+        .into_iter()
+        .filter_map(|item| item.as_submenu().cloned())
+        .collect();
+    // The first submenu is the app menu, which ends with Quit
+    if let Some(app_submenu) = submenus.first() {
+        let count = app_submenu.items()?.len();
+        if count > 0 {
+            app_submenu.remove_at(count - 1)?;
+        }
+        let quit_text = format!("Quit {}", app.package_info().name);
+        app_submenu.append(&MenuItem::with_id(app, "quit", quit_text, true, Some("CmdOrCtrl+Q"))?)?;
+    }
+    if let Some(file_submenu) = submenus.iter().find(|s| s.text().is_ok_and(|t| t == "File")) {
+        file_submenu.insert_items(
+            &[
+                &MenuItem::with_id(app, "new-file", "New File", true, Some("CmdOrCtrl+N"))?,
+                &MenuItem::with_id(app, "save-file", "Save", true, Some("CmdOrCtrl+S"))?,
+                &PredefinedMenuItem::separator(app)?,
+            ],
+            0,
+        )?;
+    }
+    Ok(menu)
+}
+
+/// Menu items. The webview handles the shortcuts first; it does not handle them in all
+/// windows, and the user can click the items.
+fn handle_menu_event(app: &AppHandle, id: &str) {
+    let focused = app
+        .webview_windows()
+        .into_values()
+        .find(|window| window.is_focused().unwrap_or(false));
+    match id {
+        "new-file" => {
+            // In the library, a new file is a new note, like Cmd+N
+            if focused.is_some_and(|w| w.label() == "main") && has_library(app) {
+                let _ = app.emit_to("main", "new-note", ());
+            } else if let Err(e) = open_untitled_file(app) {
+                eprintln!("Failed to create file: {}", e);
+            }
+        }
+        "save-file" => {
+            if let Some(window) = focused {
+                let _ = app.emit_to(window.label(), "save-file", ());
+            }
+        }
+        "quit" => {
+            app.state::<Quitting>().0.store(true, Ordering::SeqCst);
+            close_next_untitled_or_exit(app, "");
+        }
+        _ => {}
+    }
 }
 
 /// Recently opened files that still exist, most recent first.
@@ -3357,6 +3562,7 @@ pub fn run() {
 
     let app = tauri::Builder::default()
         .manage(PendingOpenedFiles(Mutex::new(Some(Vec::new()))))
+        .manage(Quitting::default())
         // Single-instance: forward CLI args from subsequent launches to the running instance
         .plugin(tauri_plugin_single_instance::init(|app, args, cwd| {
             if open_paths(app, &cli_paths(&args, &cwd)) {
@@ -3368,6 +3574,9 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_menu(app_menu(app.handle())?)?;
+
             // Load app config on startup (contains notes folder path)
             let mut app_config = load_app_config(app.handle());
 
@@ -3456,9 +3665,16 @@ pub fn run() {
 
             Ok(())
         })
+        .on_menu_event(|app, event| handle_menu_event(app, event.id().as_ref()))
         .on_window_event(|window, event| {
             if let tauri::WindowEvent::Destroyed = event {
                 ai::close_window_sessions(window.app_handle(), window.label());
+                let app = window.app_handle();
+                if window.label().starts_with(UNTITLED_LABEL_PREFIX)
+                    && app.state::<Quitting>().0.load(Ordering::SeqCst)
+                {
+                    close_next_untitled_or_exit(app, window.label());
+                }
             }
             // Handle drag-and-drop of .md files onto any window
             if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
@@ -3534,7 +3750,10 @@ pub fn run() {
             save_file_direct,
             import_file_to_folder,
             open_file_preview,
-            create_file,
+            create_untitled_file,
+            save_untitled_file,
+            discard_untitled_file,
+            cancel_quit,
             open_settings_window,
             show_settings_window,
             get_recent_files,
@@ -3752,22 +3971,49 @@ mod new_file_tests {
         dir
     }
 
+    fn write(path: &Path) -> Result<PathBuf, String> {
+        tauri::async_runtime::block_on(write_markdown_file(path, "# Ideas\n\nText"))
+    }
+
     #[test]
-    fn creates_markdown_file_with_title() {
+    fn untitled_files_get_free_names() {
+        let dir = temp_dir("untitled").join("untitled");
+
+        let first = create_untitled_in(&dir).unwrap();
+        let second = create_untitled_in(&dir).unwrap();
+
+        assert_eq!(first, dir.join("Untitled.md"));
+        assert_eq!(second, dir.join("Untitled 2.md"));
+        assert_eq!(std::fs::read_to_string(&first).unwrap(), "");
+    }
+
+    #[test]
+    fn only_files_in_the_untitled_folder_are_untitled() {
+        let dir = temp_dir("inside");
+        let untitled = dir.join("untitled");
+        let file = create_untitled_in(&untitled).unwrap();
+        std::fs::write(dir.join("Other.md"), "").unwrap();
+
+        assert!(file_in_dir(&untitled, &file.to_string_lossy()).is_ok());
+        assert!(file_in_dir(&untitled, &dir.join("Other.md").to_string_lossy()).is_err());
+        let escape = untitled.join("..").join("Other.md");
+        assert!(file_in_dir(&untitled, &escape.to_string_lossy()).is_err());
+    }
+
+    #[test]
+    fn writes_markdown_file_at_path() {
         let dir = temp_dir("create");
         let path = dir.join("Ideas.md");
 
-        let created = tauri::async_runtime::block_on(write_new_file(&path)).unwrap();
-
-        assert_eq!(created, path);
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\n");
+        assert_eq!(write(&path).unwrap(), path);
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\nText");
     }
 
     #[test]
     fn adds_md_extension_when_missing() {
         let dir = temp_dir("extension");
 
-        let created = tauri::async_runtime::block_on(write_new_file(&dir.join("Ideas"))).unwrap();
+        let created = write(&dir.join("Ideas")).unwrap();
 
         assert_eq!(created, dir.join("Ideas.md"));
         assert!(created.is_file());
@@ -3778,7 +4024,7 @@ mod new_file_tests {
         let dir = temp_dir("keep");
         std::fs::write(dir.join("Ideas.md"), "old text").unwrap();
 
-        assert!(tauri::async_runtime::block_on(write_new_file(&dir.join("Ideas"))).is_err());
+        assert!(write(&dir.join("Ideas")).is_err());
         assert_eq!(std::fs::read_to_string(dir.join("Ideas.md")).unwrap(), "old text");
     }
 
@@ -3788,8 +4034,8 @@ mod new_file_tests {
         let path = dir.join("Ideas.md");
         std::fs::write(&path, "old text").unwrap();
 
-        tauri::async_runtime::block_on(write_new_file(&path)).unwrap();
+        write(&path).unwrap();
 
-        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "# Ideas\n\nText");
     }
 }

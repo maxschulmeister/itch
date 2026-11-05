@@ -79,7 +79,8 @@ Itch is designed to be usable without a mouse. Here are the essentials to get st
 
 | Shortcut          | Action                 |
 | ----------------- | ---------------------- |
-| `Cmd+N`           | New note               |
+| `Cmd+N`           | New note or new file   |
+| `Cmd+S`           | Save a new file        |
 | `Cmd+D`           | Duplicate note         |
 | `Delete`          | Delete note            |
 | `Cmd+Backspace`   | Delete note            |

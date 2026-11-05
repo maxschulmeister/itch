@@ -35,16 +35,33 @@ export async function openFileWithDialog(): Promise<void> {
   }
 }
 
-// Ask where to save a new markdown file, then create it and open it in its own window
-export async function createFileWithDialog(): Promise<void> {
-  const selected = await save({
-    title: "New File",
-    defaultPath: "Untitled.md",
+// Create an empty untitled file in the app data and open it in its own window
+export async function createUntitledFile(): Promise<void> {
+  return invoke("create_untitled_file");
+}
+
+// Ask where to save an untitled file, then move it there. Returns null when
+// the user cancels the save dialog.
+export async function saveUntitledFileWithDialog(
+  source: string,
+  name: string,
+): Promise<FileContent | null> {
+  const path = await save({
+    title: "Save",
+    defaultPath: `${name.replace(/[\\/:*?"<>|]/g, "-")}.md`,
     filters: [{ name: "Markdown", extensions: ["md", "markdown"] }],
   });
-  if (selected) {
-    await invoke("create_file", { path: selected });
-  }
+  if (!path) return null;
+  return invoke("save_untitled_file", { source, path });
+}
+
+export async function discardUntitledFile(path: string): Promise<void> {
+  return invoke("discard_untitled_file", { path });
+}
+
+// The user kept a window open, so the app must not quit.
+export async function cancelQuit(): Promise<void> {
+  return invoke("cancel_quit");
 }
 
 export async function getRecentFiles(): Promise<string[]> {
