@@ -12,6 +12,11 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { toast } from "sonner";
 import { useNotesActions, useNotesData } from "../context/NotesContext";
 import type { PreviewModeData } from "../components/editor/Editor";
+import {
+  CONFLICT_MESSAGE,
+  documentToMarkdown as fullMarkdown,
+  markdownToDocument as splitTitle,
+} from "./editorMarkdown";
 import { merge3 } from "./merge";
 import { getConnector } from "./registry";
 import * as transport from "./transport";
@@ -36,6 +41,14 @@ const SEARCH_DEBOUNCE_MS = 300;
 export const connectionKey = (connId: string) => `c:${connId}`;
 export const spaceKey = (connId: string, spaceId: string) => `s:${connId}:${spaceId}`;
 export const documentKey = (connId: string, docId: string) => `d:${connId}:${docId}`;
+
+interface DocumentEntry {
+  conn: ConnectionInfo;
+  /** The server version that the local text is based on. */
+  doc: RemoteDocument;
+  /** A newer server version that is not merged into the local text yet. */
+  incoming?: { base: RemoteDocument; remote: RemoteDocument };
+}
 
 interface ActiveDocument {
   connId: string;
@@ -87,23 +100,6 @@ const errorMessage = (error: unknown) => {
   return message.startsWith("Network error") ? "Cannot reach the server" : message;
 };
 
-/** The editor shows a document as `# Title` and the body. */
-function fullMarkdown(doc: RemoteDocument): string {
-  const title = doc.title.replace(/[\\`*_[\]~<>#]/g, "\\$&");
-  return `# ${title}\n\n${doc.text}`;
-}
-
-/** Split editor markdown into title (first H1) and body. */
-function splitTitle(codec: MarkdownCodec, markdown: string, fallbackTitle: string) {
-  const json = codec.parse(markdown);
-  const [first, ...rest] = json.content ?? [];
-  if (first?.type !== "heading" || first.attrs?.level !== 1) {
-    return { title: fallbackTitle, text: markdown };
-  }
-  const title = (first.content ?? []).map((node) => node.text ?? "").join("").trim();
-  return { title, text: codec.serialize({ type: "doc", content: rest }) };
-}
-
 function findPath(nodes: TreeNode[], id: string): TreeNode[] | null {
   for (const node of nodes) {
     if (node.id === id) return [node];
@@ -139,8 +135,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const activeRef = useRef(active);
   activeRef.current = active;
 
-  /** Last known server version of each opened document, by document key. */
-  const bases = useRef(new Map<string, { conn: ConnectionInfo; doc: RemoteDocument }>());
+  /** Server state of each opened document, by document key. */
+  const bases = useRef(new Map<string, DocumentEntry>());
+  /** The write that runs now. Its text is the newest local text of that document. */
+  const inFlight = useRef<{ key: string; content: string } | null>(null);
   /** Markdown functions of the editor, by connection id. */
   const codecs = useRef(new Map<string, MarkdownCodec>());
   /** Edits that wait to be written, by document key. */
@@ -161,9 +159,11 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     localStorage.setItem(EXPANDED_KEY, JSON.stringify([...expanded]));
   }, [expanded]);
 
-  // A local note was selected: close the connection document
+  // A local note was selected: close the connection document and cancel an open
   useEffect(() => {
-    if (selectedNoteId) setActive(null);
+    if (!selectedNoteId) return;
+    openRequest.current++;
+    setActive(null);
   }, [selectedNoteId]);
 
   const setError = useCallback((connId: string, error: string | null) => {
@@ -268,36 +268,51 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     [expanded, loadSpaces, loadDocuments],
   );
 
-  /** Send a remote change to the editor, or merge it here if the document is closed. */
-  const deliverRemote = useCallback(
-    (key: string, base: RemoteDocument, remote: RemoteDocument, localContent: string | null) => {
-      if (activeRef.current?.key === key) {
-        setActive((prev) =>
-          prev?.key === key
-            ? {
-                ...prev,
-                title: remote.title,
-                revision: remote.revision,
-                updatedAt: remote.updatedAt,
-                remoteUpdate: {
-                  version: ++remoteVersion.current,
-                  base: fullMarkdown(base),
-                  remote: fullMarkdown(remote),
-                },
-              }
-            : prev,
-        );
-        return;
-      }
-      const entry = bases.current.get(key);
-      const codec = entry && codecs.current.get(entry.conn.id);
-      if (!codec || localContent === null) return;
-      const normalize = (markdown: string) => codec.serialize(codec.parse(markdown));
-      const merged = merge3(normalize(fullMarkdown(base)), localContent, normalize(fullMarkdown(remote)));
-      pendingWrites.current.set(key, merged.text);
+  /**
+   * Record a newer server version. The open document gets it in the editor,
+   * which merges it into its own text and then calls `remoteApplied`. A closed
+   * document merges it in the write queue (`mergeIncoming`).
+   */
+  const offerRemote = useCallback(
+    (key: string, entry: DocumentEntry, base: RemoteDocument, remote: RemoteDocument) => {
+      entry.incoming = { base: entry.incoming?.base ?? base, remote };
+      if (activeRef.current?.key !== key) return;
+      const incoming = entry.incoming;
+      setActive((prev) =>
+        prev?.key === key
+          ? {
+              ...prev,
+              title: remote.title,
+              revision: remote.revision,
+              updatedAt: remote.updatedAt,
+              remoteUpdate: {
+                version: ++remoteVersion.current,
+                base: fullMarkdown(incoming.base),
+                remote: fullMarkdown(incoming.remote),
+              },
+            }
+          : prev,
+      );
     },
     [],
   );
+
+  /**
+   * Merge the incoming server version into local text. Returns the text to
+   * write, or null when the server already has it.
+   */
+  const mergeIncoming = useCallback((entry: DocumentEntry, local: string): string | null => {
+    const incoming = entry.incoming;
+    const codec = codecs.current.get(entry.conn.id);
+    if (!incoming || !codec) return local;
+    const normalize = (markdown: string) => codec.serialize(codec.parse(markdown));
+    const remote = normalize(fullMarkdown(incoming.remote));
+    const merged = merge3(normalize(fullMarkdown(incoming.base)), local, remote);
+    entry.doc = incoming.remote;
+    entry.incoming = undefined;
+    if (merged.conflict) toast.warning(CONFLICT_MESSAGE);
+    return merged.text === remote ? null : merged.text;
+  }, []);
 
   const updateTreeTitle = useCallback((connId: string, docId: string, title: string) => {
     const rename = (nodes: TreeNode[]): TreeNode[] =>
@@ -320,7 +335,14 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       const connector = entry && getConnector(entry.conn.kind);
       if (!entry || !codec || !connector) return;
 
-      const next = splitTitle(codec, content, entry.doc.title);
+      let local: string | null = content;
+      if (entry.incoming) {
+        local = mergeIncoming(entry, content);
+        if (local === null) return;
+        inFlight.current = { key, content: local };
+      }
+
+      const next = splitTitle(codec, local, entry.doc.title);
       const result = await connector.write(entry.conn, entry.doc, next, codec);
       if (result.status === "saved") {
         const titleChanged = result.doc.title !== entry.doc.title;
@@ -337,24 +359,39 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
             : prev,
         );
       } else {
-        entry.doc = result.remote;
-        deliverRemote(key, result.base, result.remote, content);
+        // Our partial patches are in result.base, so the local text is based on it
+        entry.doc = result.base;
+        offerRemote(key, entry, result.base, result.remote);
+        if (result.remote.title !== result.base.title) {
+          updateTreeTitle(entry.conn.id, result.remote.id, result.remote.title);
+        }
+        // A closed document: merge and write again. A newer queued text wins.
+        if (activeRef.current?.key !== key && !pendingWrites.current.has(key)) {
+          pendingWrites.current.set(key, local);
+        }
       }
       setError(entry.conn.id, null);
     },
-    [deliverRemote, setError, updateTreeTitle],
+    [mergeIncoming, offerRemote, setError, updateTreeTitle],
   );
 
-  /** Write pending edits one at a time. On failure, keep the edit and try again later. */
+  /**
+   * Write pending edits one at a time. The open document waits while the
+   * editor merges an incoming version. On failure, keep the edit and try again
+   * later.
+   */
   const runWrites = useCallback(async () => {
     if (writing.current) return;
     writing.current = true;
+    const waitsForEditor = (key: string) =>
+      Boolean(bases.current.get(key)?.incoming) && activeRef.current?.key === key;
     try {
       for (;;) {
-        const next = pendingWrites.current.entries().next();
-        if (next.done) break;
-        const [key, content] = next.value;
+        const key = [...pendingWrites.current.keys()].find((k) => !waitsForEditor(k));
+        if (key === undefined) break;
+        const content = pendingWrites.current.get(key)!;
         pendingWrites.current.delete(key);
+        inFlight.current = { key, content };
         try {
           await writeOne(key, content);
         } catch (error) {
@@ -367,11 +404,15 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
             );
             continue;
           }
-          if (!pendingWrites.current.has(key)) pendingWrites.current.set(key, content);
+          // Keep the newest text: the merged text if the write merged one
+          const latest = inFlight.current?.content ?? content;
+          if (!pendingWrites.current.has(key)) pendingWrites.current.set(key, latest);
           const connId = entry?.conn.id;
           if (connId) setError(connId, `Changes not saved yet. ${errorMessage(error)}.`);
           window.setTimeout(() => void runWritesRef.current(), RETRY_MS);
           break;
+        } finally {
+          inFlight.current = null;
         }
       }
     } finally {
@@ -389,9 +430,24 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     [runWrites],
   );
 
+  /** The editor merged the incoming version of the open document into its text. */
+  const remoteApplied = useCallback((version: number) => {
+    const current = activeRef.current;
+    if (!current || current.remoteUpdate?.version !== version) return;
+    const entry = bases.current.get(current.key);
+    if (!entry?.incoming) return;
+    entry.doc = entry.incoming.remote;
+    entry.incoming = undefined;
+    // Older queued texts are part of the editor text, which the editor saves next
+    pendingWrites.current.delete(current.key);
+    void runWritesRef.current();
+  }, []);
+
   const openDocument = useCallback(
     async (connId: string, docRef: string) => {
       const [conn, connector] = lookup(connId);
+      const current = activeRef.current;
+      if (current?.key === documentKey(connId, docRef) && current.content !== null) return;
       clearSelection();
       const request = ++openRequest.current;
       const loadingKey = documentKey(connId, docRef);
@@ -406,18 +462,49 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         reloadVersion: 0,
       });
       try {
-        const known = bases.current.get(loadingKey);
-        const busy = pendingWrites.current.has(loadingKey) || writing.current;
-        const doc = known && busy ? known.doc : await connector.read(conn, docRef);
+        // Unsaved local text (queued or being written) is shown instead of the server text
+        const localDraft = (key: string) =>
+          pendingWrites.current.get(key) ??
+          (inFlight.current?.key === key ? inFlight.current.content : undefined);
+        const hasLocalState = (key: string) => {
+          const entry = bases.current.get(key);
+          return Boolean(entry && (entry.incoming || localDraft(key) !== undefined));
+        };
+
+        let doc: RemoteDocument;
+        if (hasLocalState(loadingKey)) {
+          doc = bases.current.get(loadingKey)!.doc;
+        } else {
+          // docRef can be a URL id, so the entry key is known only after the read
+          const fresh = await connector.read(conn, docRef);
+          const freshKey = documentKey(connId, fresh.id);
+          if (!hasLocalState(freshKey)) bases.current.set(freshKey, { conn, doc: fresh });
+          doc = bases.current.get(freshKey)!.doc;
+        }
+        const entryKey = documentKey(connId, doc.id);
+        const entry = bases.current.get(entryKey)!;
+        let draft = localDraft(entryKey);
+        if (entry.incoming) {
+          if (draft === undefined) {
+            entry.doc = entry.incoming.remote;
+            entry.incoming = undefined;
+          } else {
+            const merged = mergeIncoming(entry, draft);
+            if (merged === null) pendingWrites.current.delete(entryKey);
+            else pendingWrites.current.set(entryKey, merged);
+            draft = merged ?? undefined;
+            void runWritesRef.current();
+          }
+          doc = entry.doc;
+        }
         const key = documentKey(connId, doc.id);
-        bases.current.set(key, { conn, doc });
         if (request !== openRequest.current) return;
         setActive({
           connId,
           docId: doc.id,
           key,
           title: doc.title,
-          content: fullMarkdown(doc),
+          content: draft ?? fullMarkdown(doc),
           revision: doc.revision,
           updatedAt: doc.updatedAt,
           reloadVersion: 0,
@@ -441,13 +528,17 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         setActive(null);
       }
     },
-    [lookup, clearSelection, loadDocuments],
+    [lookup, clearSelection, loadDocuments, mergeIncoming],
   );
 
   const reloadActive = useCallback(async () => {
     const current = activeRef.current;
     const entry = current && bases.current.get(current.key);
     if (!current || !entry) return;
+    // A reload would drop unsaved local text; the queue and the checks handle it
+    if (entry.incoming || pendingWrites.current.has(current.key) || inFlight.current?.key === current.key) {
+      return;
+    }
     const connector = getConnector(entry.conn.kind)!;
     const doc = await connector.read(entry.conn, entry.doc.id);
     entry.doc = doc;
@@ -471,19 +562,17 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     if (!activeKey) return;
     const check = async () => {
       if (document.visibilityState !== "visible") return;
-      if (writing.current || pendingWrites.current.size > 0) return;
       const entry = bases.current.get(activeKey);
       const connector = entry && getConnector(entry.conn.kind);
-      if (!entry || !connector) return;
+      const busy = () => writing.current || pendingWrites.current.size > 0 || Boolean(entry?.incoming);
+      if (!entry || !connector || busy()) return;
       try {
         const remote = await connector.read(entry.conn, entry.doc.id);
-        if (!writing.current && pendingWrites.current.size === 0) setError(entry.conn.id, null);
-        if (remote.revision <= entry.doc.revision || writing.current) return;
-        const base = entry.doc;
-        entry.doc = remote;
-        if (remote.title !== base.title) updateTreeTitle(entry.conn.id, remote.id, remote.title);
-        deliverRemote(activeKey, base, remote, null);
+        if (busy()) return;
         setError(entry.conn.id, null);
+        if (remote.revision <= entry.doc.revision) return;
+        if (remote.title !== entry.doc.title) updateTreeTitle(entry.conn.id, remote.id, remote.title);
+        offerRemote(activeKey, entry, entry.doc, remote);
       } catch (error) {
         setError(entry.conn.id, errorMessage(error));
       }
@@ -495,7 +584,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       window.clearInterval(timer);
       document.removeEventListener("visibilitychange", check);
     };
-  }, [activeKey, deliverRemote, setError, updateTreeTitle]);
+  }, [activeKey, offerRemote, setError, updateTreeTitle]);
 
   const addConnection = useCallback(
     async (kind: string, baseUrl: string, token: string) => {
@@ -520,7 +609,10 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const removeConnection = useCallback(
     async (id: string) => {
       await transport.removeConnection(id);
-      if (activeRef.current?.connId === id) setActive(null);
+      if (activeRef.current?.connId === id) {
+        openRequest.current++;
+        setActive(null);
+      }
       await reloadConnections();
     },
     [reloadConnections],
@@ -551,21 +643,14 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     async (connId: string, docId: string, title: string) => {
       const [conn, connector] = lookup(connId);
       try {
+        // The open document gets the new title from the next check
         await connector.rename(conn, docId, title);
         updateTreeTitle(connId, docId, title);
-        const key = documentKey(connId, docId);
-        const entry = bases.current.get(key);
-        if (entry && activeRef.current?.key === key) {
-          const remote = await connector.read(conn, docId);
-          const base = entry.doc;
-          entry.doc = remote;
-          deliverRemote(key, base, remote, null);
-        }
       } catch (error) {
         toast.error(`Could not rename the document: ${errorMessage(error)}`);
       }
     },
-    [lookup, updateTreeTitle, deliverRemote],
+    [lookup, updateTreeTitle],
   );
 
   const moveDocument = useCallback(
@@ -670,6 +755,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       dialect: connector.dialect(conn),
       onCodec: (codec) => codecs.current.set(conn.id, codec),
       remoteUpdate: active.remoteUpdate,
+      onRemoteApplied: remoteApplied,
       uploadImage: (file, name) => connector.uploadImage(conn, active.docId, file, name),
       openLink: (href) => {
         const ref = connector.documentFromLink(conn, href);
@@ -684,7 +770,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         return href.startsWith("mention://");
       },
     };
-  }, [active, connections, save, reloadActive, openDocument]);
+  }, [active, connections, save, reloadActive, openDocument, remoteApplied]);
 
   const value = useMemo<ConnectionsContextValue>(
     () => ({

@@ -77,7 +77,16 @@ fn find_config(app: &AppHandle, id: &str) -> Result<ConnectionConfig, String> {
         .ok_or_else(|| "Connection not found".to_string())
 }
 
+/// Connection ids come from `connections_add`: the kind, a dash, and hex digits.
+/// The check keeps an id from naming another path when joined to a folder.
+fn is_valid_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-')
+}
+
 fn cache_dir(app: &AppHandle, id: &str) -> Result<PathBuf, String> {
+    if !is_valid_id(id) {
+        return Err("Invalid connection id".to_string());
+    }
     let dir = app.path().app_cache_dir().map_err(|e| e.to_string())?;
     Ok(dir.join("connections").join(id))
 }
@@ -154,15 +163,15 @@ pub fn connections_rename(app: AppHandle, id: String, name: String) -> Result<()
 
 #[tauri::command]
 pub fn connections_remove(app: AppHandle, id: String) -> Result<(), String> {
+    find_config(&app, &id)?;
+    let cache = cache_dir(&app, &id)?;
     let configs: Vec<_> = load_configs(&app)?
         .into_iter()
         .filter(|c| c.id != id)
         .collect();
     save_configs(&app, &configs)?;
     secrets::delete(&app, &id)?;
-    if let Ok(dir) = cache_dir(&app, &id) {
-        let _ = std::fs::remove_dir_all(dir);
-    }
+    let _ = std::fs::remove_dir_all(cache);
     Ok(())
 }
 
@@ -321,6 +330,16 @@ mod tests {
         );
         assert!(normalize_base_url("http://team.example.com").is_err());
         assert!(normalize_base_url("not a url").is_err());
+    }
+
+    #[test]
+    fn connection_ids_cannot_name_other_paths() {
+        assert!(is_valid_id("outline-18e54025f8172260"));
+        assert!(!is_valid_id(""));
+        assert!(!is_valid_id("/Users/someone"));
+        assert!(!is_valid_id("../.."));
+        assert!(!is_valid_id("a/b"));
+        assert!(!is_valid_id("C:\\Users"));
     }
 
     #[test]

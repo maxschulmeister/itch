@@ -39,6 +39,7 @@ import { join } from "@tauri-apps/api/path";
 import { toast } from "sonner";
 import type { EditorDialect, MarkdownCodec } from "../../connections/types";
 import { merge3 } from "../../connections/merge";
+import { CONFLICT_MESSAGE } from "../../connections/editorMarkdown";
 import { replaceDocumentKeepingSelection } from "./replaceDocument";
 import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
 
@@ -446,6 +447,9 @@ function FormatBar({
   );
 }
 
+const IMAGE_DOCUMENT_CHANGED =
+  "The image was not added, because another document opened during the upload.";
+
 // Data source that bypasses NotesContext: preview windows and connection documents
 export interface PreviewModeData {
   content: string | null;
@@ -462,6 +466,8 @@ export interface PreviewModeData {
   onCodec?: (codec: MarkdownCodec) => void;
   /** Remote text to merge into the editor. A new `version` starts a merge. */
   remoteUpdate?: { version: number; base: string; remote: string };
+  /** Called after the editor merged `remoteUpdate` into its text. */
+  onRemoteApplied?: (version: number) => void;
   /** Uploads an image and returns the source to put in the document. */
   uploadImage?: (file: Blob, name: string) => Promise<string>;
   /** Opens a link. Returns false to use the default behavior. */
@@ -1241,9 +1247,14 @@ export function Editor({
 
               const uploadImage = previewModeRef.current?.uploadImage;
               if (uploadImage) {
+                const noteId = loadedNoteIdRef.current;
                 try {
                   const extension = blob.type.split("/")[1] || "png";
                   const src = await uploadImage(blob, `pasted-image.${extension}`);
+                  if (loadedNoteIdRef.current !== noteId) {
+                    toast.error(IMAGE_DOCUMENT_CHANGED);
+                    return;
+                  }
                   editorRef.current?.chain().focus().setImage({ src }).run();
                 } catch (error) {
                   console.error("Failed to upload image:", error);
@@ -1364,41 +1375,6 @@ export function Editor({
     });
   }, [editor, dialect]);
 
-  // Merge remote changes into the editor and keep the cursor
-  const remoteUpdate = previewMode?.remoteUpdate;
-  const lastRemoteVersionRef = useRef(0);
-  useEffect(() => {
-    const manager = editor?.storage.markdown?.manager;
-    if (!editor || !manager || !remoteUpdate) return;
-    if (remoteUpdate.version === lastRemoteVersionRef.current) return;
-    lastRemoteVersionRef.current = remoteUpdate.version;
-
-    const normalize = (markdown: string) => {
-      const json = manager.parse(markdown);
-      return manager
-        .serialize(dialect ? dialect.prepareForSerialize(json) : json)
-        .replace(/&nbsp;|&#160;/g, " ");
-    };
-    const current = getMarkdown(editor);
-    const remote = normalize(remoteUpdate.remote);
-    const { text, conflict } = merge3(normalize(remoteUpdate.base), current, remote);
-    if (text !== current) {
-      const json = manager.parse(text);
-      try {
-        replaceDocumentKeepingSelection(editor, json);
-      } catch {
-        editor.commands.setContent(json);
-      }
-    }
-    // Local changes are not on the server yet. Save them, also when the
-    // editor text did not change (for example when the local words won).
-    if (text !== remote) scheduleSave();
-    if (conflict) {
-      toast.warning(
-        "Someone changed the same text. Your version was kept. The other version is in the document history.",
-      );
-    }
-  }, [editor, remoteUpdate, dialect, getMarkdown, scheduleSave]);
 
   // Sync notes list into editor storage for wikilink autocomplete
   useEffect(() => {
@@ -1887,10 +1863,15 @@ export function Editor({
     });
     const uploadImage = previewModeRef.current?.uploadImage;
     if (selected && uploadImage) {
+      const noteId = loadedNoteIdRef.current;
       try {
         const path = selected as string;
         const blob = await (await fetch(convertFileSrc(path))).blob();
         const src = await uploadImage(blob, path.split(/[\\/]/).pop() ?? "image");
+        if (loadedNoteIdRef.current !== noteId) {
+          toast.error(IMAGE_DOCUMENT_CHANGED);
+          return;
+        }
         editor.chain().focus().setImage({ src }).run();
       } catch (error) {
         console.error("Failed to upload image:", error);
@@ -2300,6 +2281,47 @@ export function Editor({
     },
     [currentNote, saveNote],
   );
+
+  // Merge remote changes into the text that is being edited (the editor or
+  // the source view) and keep the cursor. Then tell the source.
+  const remoteUpdate = previewMode?.remoteUpdate;
+  const lastRemoteVersionRef = useRef(0);
+  useEffect(() => {
+    const manager = editor?.storage.markdown?.manager;
+    if (!editor || !manager || !remoteUpdate) return;
+    if (remoteUpdate.version === lastRemoteVersionRef.current) return;
+    lastRemoteVersionRef.current = remoteUpdate.version;
+
+    const normalize = (markdown: string) => {
+      const json = manager.parse(markdown);
+      return manager
+        .serialize(dialect ? dialect.prepareForSerialize(json) : json)
+        .replace(/&nbsp;|&#160;/g, " ");
+    };
+    const current = sourceMode ? sourceContent : getMarkdown(editor);
+    const remote = normalize(remoteUpdate.remote);
+    const { text, conflict } = merge3(normalize(remoteUpdate.base), current, remote);
+    if (sourceMode) {
+      // Also saves when only the local text differs from the server
+      if (text !== current || text !== remote) handleSourceChange(text);
+    } else {
+      if (text !== current) {
+        const json = manager.parse(text);
+        try {
+          replaceDocumentKeepingSelection(editor, json);
+        } catch {
+          editor.commands.setContent(json);
+        }
+      }
+      // Local changes are not on the server yet. Save them, also when the
+      // editor text did not change (for example when the local words won).
+      if (text !== remote) scheduleSave();
+    }
+    previewModeRef.current?.onRemoteApplied?.(remoteUpdate.version);
+    if (conflict) toast.warning(CONFLICT_MESSAGE);
+    // sourceContent is read at merge time only; a new version starts a merge
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, remoteUpdate, dialect, getMarkdown, scheduleSave, sourceMode, handleSourceChange]);
 
   if (!currentNote) {
     // Preview mode: show loading state (content not yet loaded)

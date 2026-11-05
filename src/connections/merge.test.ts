@@ -37,6 +37,18 @@ describe("merge3", () => {
     expect(merge3(base, local, local)).toEqual({ text: local, conflict: false });
   });
 
+  it("reports a conflict when both sides change the same characters", () => {
+    const b = "The number is 10000. This is a long sentence.";
+    const result = merge3(b, b.replace("10000", "10001"), b.replace("10000", "10002"));
+    expect(result).toEqual({ text: b.replace("10000", "10001"), conflict: true });
+  });
+
+  it("reports a conflict when both sides insert different text at the same place", () => {
+    const b = "Alpha beta.";
+    const result = merge3(b, "Alpha mine beta.", "Alpha theirs beta.");
+    expect(result).toEqual({ text: "Alpha mine beta.", conflict: true });
+  });
+
   it("keeps the local words and reports a conflict when both edit the same words", () => {
     const local = base.replace("Second paragraph here.", "Mine.");
     const remote = base.replace("Second paragraph here.", "Theirs.");

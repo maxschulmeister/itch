@@ -51,9 +51,24 @@ describe("Outline dialect", () => {
 
   it("escapes text the same way as Outline", () => {
     expect(roundTrip("type \\*\\*bold\\*\\* now")).toBe("type \\*\\*bold\\*\\* now");
-    expect(roundTrip("snake_case and a\\~b")).toBe("snake_case and a\\~b");
+    expect(roundTrip("snake_case and a\\~b")).toBe("snake\\_case and a\\~b");
     expect(roundTrip("\\# not a heading")).toBe("\\# not a heading");
     expect(roundTrip("use `a*b` here")).toBe("use `a*b` here");
+  });
+
+  it("keeps literal delimiters literal when the text is read again", () => {
+    for (const literal of [
+      "\\_literal\\_ and \\_\\_not underline\\_\\_",
+      "a \\=\\=not highlight\\=\\= b",
+      "costs \\$5 and \\$x\\$",
+      "\\<b>not html\\</b>",
+      "\\> not a quote",
+      "\\+++ not a toggle",
+    ]) {
+      const once = codec.serialize(codec.parse(literal));
+      expect(codec.serialize(codec.parse(once))).toBe(once);
+      expect(once).toBe(literal);
+    }
   });
 
   it("is stable after one round trip", () => {

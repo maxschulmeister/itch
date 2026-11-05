@@ -198,9 +198,15 @@ const EscapedCharacter = Extension.create({
 const VERBATIM_NODES = new Set(["codeBlock", "blockMath", "outlineInlineMath", "frontmatter"]);
 const LINE_NODES = new Set(["paragraph", "heading", "tableCell", "tableHeader"]);
 
-/** Same rules as `esc()` in Outline's markdown serializer. */
+/**
+ * The rules of `esc()` in Outline's markdown serializer, plus escapes for the
+ * other delimiters this dialect reads (`_`, `==`, `$`, `<`, `>` at line start).
+ * Without them, literal text would become formatting when it is read again.
+ */
 function escapeText(text: string, startOfLine: boolean, inTable: boolean): string {
-  let out = text.replace(/[`*\\~]/g, "\\$&");
+  let out = text
+    .replace(/[`*\\~_$<]/g, "\\$&")
+    .replace(/={2,}/g, (run) => run.replace(/=/g, "\\="));
   out = out
     .split("\n")
     .map((line) => {
@@ -210,7 +216,7 @@ function escapeText(text: string, startOfLine: boolean, inTable: boolean): strin
     .join("\n");
   if (startOfLine) {
     out = out
-      .replace(/^[:#\-*+]/, "\\$&")
+      .replace(/^[:#\-*+>]/, "\\$&")
       .replace(/^(\d+)\.(?=\s|$)/, "$1\\.")
       .replace(/^([a-z])\.(?=\s)/i, "$1\\.");
   }
@@ -218,12 +224,30 @@ function escapeText(text: string, startOfLine: boolean, inTable: boolean): strin
   return out;
 }
 
+/** Join neighbor text nodes with the same marks, so escapes see whole runs like `==`. */
+function joinText(content: JSONContent[]): JSONContent[] {
+  const joined: JSONContent[] = [];
+  for (const child of content) {
+    const last = joined[joined.length - 1];
+    if (
+      child.type === "text" &&
+      last?.type === "text" &&
+      JSON.stringify(last.marks ?? []) === JSON.stringify(child.marks ?? [])
+    ) {
+      joined[joined.length - 1] = { ...last, text: (last.text ?? "") + (child.text ?? "") };
+    } else {
+      joined.push(child);
+    }
+  }
+  return joined;
+}
+
 function escapeNode(node: JSONContent, inTable: boolean): JSONContent {
   if (VERBATIM_NODES.has(node.type ?? "")) return node;
   const table = inTable || node.type === "table";
   if (!node.content) return node;
   let lineStart = LINE_NODES.has(node.type ?? "");
-  const content = node.content.map((child) => {
+  const content = joinText(node.content).map((child) => {
     if (child.type === "text") {
       const isCode = child.marks?.some((m) => m.type === "code");
       const text = isCode ? child.text : escapeText(child.text ?? "", lineStart, table);

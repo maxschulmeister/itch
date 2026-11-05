@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { createTestCodec } from "../testCodec";
 import { createOutlineDialect } from "./dialect";
 import { computePatches } from "./patch";
+import { documentToMarkdown, markdownToDocument } from "../editorMarkdown";
 
 const codec = createTestCodec(createOutlineDialect((src) => src));
 
@@ -78,5 +79,15 @@ describe("computePatches", () => {
     const twice = "Same.\n\nMiddle.\n\nSame.";
     const next = "Changed.\n\nMiddle.\n\nSame.";
     expect(computePatches(codec, twice, next)).toEqual([{ findText: "Same.", text: "Changed." }]);
+  });
+
+  it("patches only the edited block after the editor title split", () => {
+    const text = "\\_literal\\_ and a \\=\\=b\\=\\= stay.\n\nEdit me.";
+    const editor = codec.serialize(codec.parse(documentToMarkdown({ title: "A *title*", text })));
+    const next = markdownToDocument(codec, editor.replace("Edit me.", "Edited."), "x");
+    expect(next.title).toBe("A *title*");
+    expect(computePatches(codec, text, next.text)).toEqual([
+      { findText: "Edit me.", text: "Edited." },
+    ]);
   });
 });

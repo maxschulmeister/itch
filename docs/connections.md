@@ -60,7 +60,9 @@ To add a connector, add a folder `src/connections/<kind>/` that implements `Conn
 
 ### Remote changes
 
-- The open document: `documents.info` every 4 s while the window is visible, and at once when it shows again. If the revision changed, the editor merges the remote text into its current text and keeps the cursor. Remote changes are not added to the undo history.
+- The open document: `documents.info` every 4 s while the window is visible, and at once when it shows again. If the revision changed, the editor merges the remote text into the text being edited (editor or source view) and keeps the cursor. Remote changes are not added to the undo history.
+- Each opened document records the server version its local text is based on. A newer version (from a check or a `409`) is "incoming" until it is merged. The open document waits for the editor to merge and confirm (`onRemoteApplied`); a closed document is merged in the write queue with its newest queued text. Reopening a document shows its unsaved local text, not the server text.
+- The merge is a three-way character merge. Edits that overlap or touch count as a conflict, unless both sides made the same change.
 - Tree: `collections.documents` every 45 s for expanded collections.
 - When both sides changed the same words, the local words stay, itch shows a message, and the other version stays in the Outline history.
 - Outline sends API edits to open web editors at once (`APIUpdateExtension`), so itch edits show live in the web app.
