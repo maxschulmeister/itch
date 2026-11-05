@@ -509,12 +509,13 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
           if (merged === null) pendingWrites.current.delete(key);
           else pendingWrites.current.set(key, merged);
           draft = merged ?? undefined;
+          syncSaving();
           void runWritesRef.current();
         }
       }
       return draft ?? fullMarkdown(entry.doc);
     },
-    [localDraft, mergeIncoming],
+    [localDraft, mergeIncoming, syncSaving],
   );
 
   /**

@@ -2191,7 +2191,8 @@ export function Editor({
       const pendingSource = pendingSourceRef.current;
       pendingSourceRef.current = null;
       if (pendingSource) {
-        saveNote(pendingSource.content, pendingSource.noteId).catch((error) =>
+        // Record the save, so the rename check knows the note when its id changes
+        saveImmediately(pendingSource.noteId, pendingSource.content).catch((error) =>
           console.error("Failed to save note:", error),
         );
       }
@@ -2210,7 +2211,7 @@ export function Editor({
       }
       setSourceMode(false);
     }
-  }, [editor, sourceMode, sourceContent, getMarkdown, flushPendingSave, saveNote]);
+  }, [editor, sourceMode, sourceContent, getMarkdown, flushPendingSave, saveImmediately]);
 
   // Restore focus and scroll position after source mode transitions.
   // useLayoutEffect runs synchronously after React commits DOM changes,
