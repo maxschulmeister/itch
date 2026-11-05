@@ -6,7 +6,13 @@ import { useTheme } from "../../context/ThemeContext";
 import { connectors } from "../../connections/registry";
 import type { Connector } from "../../connections/types";
 import { AddConnectionForm } from "../settings/ConnectionsSettingsSection";
-import { AlertDialog, AlertDialogContent, AlertDialogTitle, Button } from "../ui";
+import {
+  AlertDialog,
+  AlertDialogContent,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+  Button,
+} from "../ui";
 import { NoteIcon } from "../icons";
 import { isWindows, mod, shortcut } from "../../lib/platform";
 import * as filesService from "../../services/files";
@@ -116,33 +122,40 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
             <Button onClick={handleOpenFolder} variant="outline" size="xl">
               Open Folder…
             </Button>
-            <Button onClick={openConnect} variant="outline" size="xl">
-              Connect…
-            </Button>
+            {/* The trigger gets the focus back when the dialog closes */}
+            <AlertDialog open={connecting} onOpenChange={setConnecting}>
+              <AlertDialogTrigger asChild>
+                <Button onClick={openConnect} variant="outline" size="xl">
+                  Connect…
+                </Button>
+              </AlertDialogTrigger>
+              <AlertDialogContent aria-describedby={undefined}>
+                <AlertDialogTitle>
+                  {connector ? `Connect ${connector.label}` : "Connect a Workspace"}
+                </AlertDialogTitle>
+                {connector ? (
+                  <AddConnectionForm
+                    connector={connector}
+                    onDone={() => setConnecting(false)}
+                    className="space-y-3"
+                  />
+                ) : (
+                  <div className="flex flex-wrap gap-2">
+                    {connectors.map((item) => (
+                      <Button
+                        key={item.kind}
+                        variant="outline"
+                        size="md"
+                        onClick={() => setConnector(item)}
+                      >
+                        {item.label}
+                      </Button>
+                    ))}
+                  </div>
+                )}
+              </AlertDialogContent>
+            </AlertDialog>
           </div>
-
-          <AlertDialog open={connecting} onOpenChange={setConnecting}>
-            <AlertDialogContent aria-describedby={undefined}>
-              <AlertDialogTitle>
-                {connector ? `Connect ${connector.label}` : "Connect a Workspace"}
-              </AlertDialogTitle>
-              {connector ? (
-                <AddConnectionForm
-                  connector={connector}
-                  onDone={() => setConnecting(false)}
-                  className="space-y-3"
-                />
-              ) : (
-                <div className="flex flex-wrap gap-2">
-                  {connectors.map((item) => (
-                    <Button key={item.kind} variant="outline" size="md" onClick={() => setConnector(item)}>
-                      {item.label}
-                    </Button>
-                  ))}
-                </div>
-              )}
-            </AlertDialogContent>
-          </AlertDialog>
 
           {recentFiles.length > 0 && (
             <section
