@@ -1380,11 +1380,8 @@ export function Editor({
         .replace(/&nbsp;|&#160;/g, " ");
     };
     const current = getMarkdown(editor);
-    const { text, conflict } = merge3(
-      normalize(remoteUpdate.base),
-      current,
-      normalize(remoteUpdate.remote),
-    );
+    const remote = normalize(remoteUpdate.remote);
+    const { text, conflict } = merge3(normalize(remoteUpdate.base), current, remote);
     if (text !== current) {
       const json = manager.parse(text);
       try {
@@ -1393,12 +1390,15 @@ export function Editor({
         editor.commands.setContent(json);
       }
     }
+    // Local changes are not on the server yet. Save them, also when the
+    // editor text did not change (for example when the local words won).
+    if (text !== remote) scheduleSave();
     if (conflict) {
       toast.warning(
         "Someone changed the same text. Your version was kept. The other version is in the document history.",
       );
     }
-  }, [editor, remoteUpdate, dialect, getMarkdown]);
+  }, [editor, remoteUpdate, dialect, getMarkdown, scheduleSave]);
 
   // Sync notes list into editor storage for wikilink autocomplete
   useEffect(() => {

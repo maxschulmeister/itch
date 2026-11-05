@@ -15,6 +15,7 @@ import type { PreviewModeData } from "../components/editor/Editor";
 import { merge3 } from "./merge";
 import { getConnector } from "./registry";
 import * as transport from "./transport";
+import { ConnectionError } from "./transport";
 import type {
   ConnectionInfo,
   Connector,
@@ -81,7 +82,10 @@ interface ConnectionsContextValue {
 
 const ConnectionsContext = createContext<ConnectionsContextValue | null>(null);
 
-const errorMessage = (error: unknown) => (error instanceof Error ? error.message : String(error));
+const errorMessage = (error: unknown) => {
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("Network error") ? "Cannot reach the server" : message;
+};
 
 /** The editor shows a document as `# Title` and the body. */
 function fullMarkdown(doc: RemoteDocument): string {
@@ -143,6 +147,8 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const pendingWrites = useRef(new Map<string, string>());
   const writing = useRef(false);
   const remoteVersion = useRef(0);
+  /** Increases with each openDocument call, so an older call does not win. */
+  const openRequest = useRef(0);
 
   const lookup = useCallback((connId: string): [ConnectionInfo, Connector] => {
     const conn = connectionsRef.current.find((c) => c.id === connId);
@@ -352,9 +358,18 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         try {
           await writeOne(key, content);
         } catch (error) {
+          console.warn("Could not save connection document", key, error);
+          const entry = bases.current.get(key);
+          if (error instanceof ConnectionError && (error.status === 404 || error.status === 403)) {
+            // Trying again cannot help: the document is gone or not writable
+            toast.error(
+              `Could not save “${entry?.doc.title || "Untitled"}”: the document was deleted or you have no write access.`,
+            );
+            continue;
+          }
           if (!pendingWrites.current.has(key)) pendingWrites.current.set(key, content);
-          const connId = bases.current.get(key)?.conn.id;
-          if (connId) setError(connId, `Changes not saved yet: ${errorMessage(error)}`);
+          const connId = entry?.conn.id;
+          if (connId) setError(connId, `Changes not saved yet. ${errorMessage(error)}.`);
           window.setTimeout(() => void runWritesRef.current(), RETRY_MS);
           break;
         }
@@ -378,6 +393,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     async (connId: string, docRef: string) => {
       const [conn, connector] = lookup(connId);
       clearSelection();
+      const request = ++openRequest.current;
       const loadingKey = documentKey(connId, docRef);
       setActive({
         connId,
@@ -395,7 +411,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         const doc = known && busy ? known.doc : await connector.read(conn, docRef);
         const key = documentKey(connId, doc.id);
         bases.current.set(key, { conn, doc });
-        if (activeRef.current?.key !== loadingKey) return;
+        if (request !== openRequest.current) return;
         setActive({
           connId,
           docId: doc.id,
@@ -420,8 +436,9 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         });
         if (!tree) void loadDocuments(connId, doc.spaceId);
       } catch (error) {
+        if (request !== openRequest.current) return;
         toast.error(`Could not open the document: ${errorMessage(error)}`);
-        setActive((prev) => (prev?.key === loadingKey ? null : prev));
+        setActive(null);
       }
     },
     [lookup, clearSelection, loadDocuments],
@@ -460,6 +477,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       if (!entry || !connector) return;
       try {
         const remote = await connector.read(entry.conn, entry.doc.id);
+        if (!writing.current && pendingWrites.current.size === 0) setError(entry.conn.id, null);
         if (remote.revision <= entry.doc.revision || writing.current) return;
         const base = entry.doc;
         entry.doc = remote;

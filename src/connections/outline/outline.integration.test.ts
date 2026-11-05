@@ -136,6 +136,17 @@ describe.skipIf(!BASE_URL || !API_KEY)("Outline connector (live)", () => {
     if (result.status === "conflict") expect(result.remote.text).toContain("1st");
   });
 
+  it("saves the full text when Outline does not find a patched block", async () => {
+    const current = await outline.read(conn, doc.id);
+    // A base that differs from the server text, at the same revision
+    const stale = { ...current, text: current.text.replace("A notice", "Stale notice") };
+    const next = codec.serialize(codec.parse(stale.text)).replace("Stale notice", "Fallback notice");
+    const result = await outline.write(conn, stale, { title: stale.title, text: next }, codec);
+    expect(result.status).toBe("saved");
+    expect((await outline.read(conn, doc.id)).text).toContain("Fallback notice");
+    doc = await outline.read(conn, doc.id);
+  });
+
   it("creates, moves, and searches documents", async () => {
     const child = await outline.create(conn, { spaceId, parentId: doc.id }, "itch child");
     created.unshift(child.id);

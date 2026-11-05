@@ -128,8 +128,13 @@ export const outlineConnector: Connector = {
           try {
             await update({ editMode: "patch", findText: patch.findText, text: patch.text });
           } catch (error) {
-            // Outline did not find the block. Save the full text, so no edit is lost.
-            if (!(error instanceof ConnectionError) || error.status !== 400) throw error;
+            // Outline did not find the block (Outline cloud answers 404, the
+            // open-source server 400). Save the full text, so no edit is lost.
+            // With lastRevision, a changed document still gives a conflict, and
+            // a deleted document gives 404 again.
+            const notFound =
+              error instanceof ConnectionError && (error.status === 400 || error.status === 404);
+            if (!notFound) throw error;
             console.warn("Outline patch failed, replacing the full text:", error.message);
             await update({ text: next.text });
             break;
