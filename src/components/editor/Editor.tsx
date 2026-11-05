@@ -470,6 +470,8 @@ export interface PreviewModeData {
   onRemoteApplied?: (version: number) => void;
   /** Called when the editor mounts; the returned function when it unmounts. */
   attach?: () => () => void;
+  /** Gives the source a function that saves the edits waiting for the auto-save delay. */
+  registerSaveFlush?: (flush: () => Promise<void>) => () => void;
   /** Uploads an image and returns the source to put in the document. */
   uploadImage?: (file: Blob, name: string) => Promise<string>;
   /** Opens a link. Returns false to use the default behavior. */
@@ -1716,6 +1718,11 @@ export function Editor({
   useEffect(
     () => registerSaveFlush?.(flushAllSaves),
     [registerSaveFlush, flushAllSaves],
+  );
+  const registerSourceSaveFlush = previewMode?.registerSaveFlush;
+  useEffect(
+    () => registerSourceSaveFlush?.(flushAllSaves),
+    [registerSourceSaveFlush, flushAllSaves],
   );
 
   // Cleanup on unmount - flush pending saves

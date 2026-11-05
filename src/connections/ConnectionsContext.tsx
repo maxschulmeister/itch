@@ -151,6 +151,8 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const editorAttached = useRef(false);
   /** Other ids of documents (for example URL ids in links), by `connId:ref`. */
   const aliases = useRef(new Map<string, string>());
+  /** Queues the editor text that waits for the auto-save delay. */
+  const editorFlush = useRef<(() => Promise<void>) | null>(null);
 
   const lookup = useCallback((connId: string): [ConnectionInfo, Connector] => {
     const conn = connectionsRef.current.find((c) => c.id === connId);
@@ -403,9 +405,13 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     if (writing.current) return;
     writing.current = true;
     const waitsForEditor = (key: string) => Boolean(bases.current.get(key)?.incoming) && ownsText(key);
+    // A failed document waits for the next run; other documents still save
+    const failed = new Set<string>();
     try {
       for (;;) {
-        const key = [...pendingWrites.current.keys()].find((k) => !waitsForEditor(k));
+        const key = [...pendingWrites.current.keys()].find(
+          (k) => !waitsForEditor(k) && !failed.has(k),
+        );
         if (key === undefined) break;
         const content = pendingWrites.current.get(key)!;
         pendingWrites.current.delete(key);
@@ -422,13 +428,13 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
             );
             continue;
           }
+          // The connection was removed during the write: nothing to keep
+          if (!entry) continue;
           // Keep the newest text: the merged text if the write merged one
           const latest = inFlight.current?.content ?? content;
           if (!pendingWrites.current.has(key)) pendingWrites.current.set(key, latest);
-          const connId = entry?.conn.id;
-          if (connId) setError(connId, `Changes not saved yet. ${errorMessage(error)}.`);
-          window.setTimeout(() => void runWritesRef.current(), RETRY_MS);
-          break;
+          setError(entry.conn.id, `Changes not saved yet. ${errorMessage(error)}.`);
+          failed.add(key);
         } finally {
           inFlight.current = null;
         }
@@ -436,17 +442,26 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     } finally {
       writing.current = false;
     }
+    if (failed.size > 0) window.setTimeout(() => void runWritesRef.current(), RETRY_MS);
   }, [writeOne, ownsText, setError]);
   const runWritesRef = useRef(runWrites);
   runWritesRef.current = runWrites;
 
+  /** Queue editor text. The write runs in the background, so a flush returns at once. */
   const save = useCallback(
     async (key: string, content: string) => {
       pendingWrites.current.set(key, content);
-      await runWrites();
+      void runWrites();
     },
     [runWrites],
   );
+
+  const registerSaveFlush = useCallback((flush: () => Promise<void>) => {
+    editorFlush.current = flush;
+    return () => {
+      if (editorFlush.current === flush) editorFlush.current = null;
+    };
+  }, []);
 
   /** The editor merged the incoming version of the open document into its text. */
   const remoteApplied = useCallback((version: number) => {
@@ -458,6 +473,12 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     entry.incoming = undefined;
     // Older queued texts are part of the editor text, which the editor saves next
     pendingWrites.current.delete(current.key);
+    // A new editor (after Settings) must not apply this version again
+    setActive((prev) =>
+      prev?.key === current.key && prev.remoteUpdate?.version === version
+        ? { ...prev, remoteUpdate: undefined }
+        : prev,
+    );
     void runWritesRef.current();
   }, []);
 
@@ -492,14 +513,19 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     const current = activeRef.current;
     if (current?.content != null && bases.current.has(current.key)) {
       const text = textToShow(current.key);
-      if (text !== current.content) {
-        // The text changed while no editor showed it: load the new text
-        setActive((prev) =>
-          prev?.key === current.key
-            ? { ...prev, content: text, reloadVersion: prev.reloadVersion + 1 }
-            : prev,
-        );
-      }
+      // The text is merged now; a remote update from before must not apply again.
+      // If the text changed while no editor showed it, load the new text.
+      setActive((prev) =>
+        prev?.key === current.key
+          ? {
+              ...prev,
+              remoteUpdate: undefined,
+              ...(text !== current.content
+                ? { content: text, reloadVersion: prev.reloadVersion + 1 }
+                : {}),
+            }
+          : prev,
+      );
     }
     return () => {
       editorAttached.current = false;
@@ -508,7 +534,9 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         const active = activeRef.current;
         if (active?.content != null && bases.current.has(active.key) && !editorAttached.current) {
           const text = textToShow(active.key);
-          setActive((prev) => (prev?.key === active.key ? { ...prev, content: text } : prev));
+          setActive((prev) =>
+            prev?.key === active.key ? { ...prev, content: text, remoteUpdate: undefined } : prev,
+          );
         }
         void runWritesRef.current();
       }, 0);
@@ -526,6 +554,8 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       const docRef = aliases.current.get(`${connId}:${ref}`) ?? ref;
       const previous = activeRef.current;
       if (previous?.key === documentKey(connId, docRef) && previous.content !== null) return;
+      // Queue the text of the document that the editor leaves, before writes for it continue
+      if (editorAttached.current) await editorFlush.current?.();
       const editorKey = editorAttached.current ? previous?.key : undefined;
       clearSelection();
       const request = ++openRequest.current;
@@ -696,9 +726,22 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         openRequest.current++;
         setActive(null);
       }
+      // Drop its queued writes and cached state, so they cannot block other writes
+      const prefix = `d:${id}:`;
+      for (const key of [...pendingWrites.current.keys()]) {
+        if (key.startsWith(prefix)) pendingWrites.current.delete(key);
+      }
+      for (const key of [...bases.current.keys()]) {
+        if (key.startsWith(prefix)) bases.current.delete(key);
+      }
+      for (const key of [...aliases.current.keys()]) {
+        if (key.startsWith(`${id}:`)) aliases.current.delete(key);
+      }
+      codecs.current.delete(id);
+      setError(id, null);
       await reloadConnections();
     },
-    [reloadConnections],
+    [reloadConnections, setError],
   );
 
   const refresh = useCallback((connId: string) => refreshTrees(connId), [refreshTrees]);
@@ -840,6 +883,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
       remoteUpdate: active.remoteUpdate,
       onRemoteApplied: remoteApplied,
       attach: attachEditor,
+      registerSaveFlush,
       uploadImage: (file, name) => connector.uploadImage(conn, active.docId, file, name),
       openLink: (href) => {
         const ref = connector.documentFromLink(conn, href);
@@ -854,7 +898,16 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
         return href.startsWith("mention://");
       },
     };
-  }, [active, connections, save, reloadActive, openDocument, remoteApplied, attachEditor]);
+  }, [
+    active,
+    connections,
+    save,
+    reloadActive,
+    openDocument,
+    remoteApplied,
+    attachEditor,
+    registerSaveFlush,
+  ]);
 
   const value = useMemo<ConnectionsContextValue>(
     () => ({
