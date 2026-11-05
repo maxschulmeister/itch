@@ -5,7 +5,7 @@ import CodeBlock from "@tiptap/extension-code-block";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
 import { TableKit } from "@tiptap/extension-table";
-import { ScratchBlockMath } from "../components/editor/MathExtensions";
+import { ItchBlockMath } from "../components/editor/MathExtensions";
 import type { EditorDialect, MarkdownCodec } from "./types";
 
 /**
@@ -22,7 +22,7 @@ export function createTestCodec(dialect: EditorDialect): MarkdownCodec {
       TaskItem.configure({ nested: true }),
       TableKit,
       CodeBlock,
-      ScratchBlockMath,
+      ItchBlockMath,
       ...dialect.extensions,
     ],
   });

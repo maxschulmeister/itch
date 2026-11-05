@@ -23,7 +23,7 @@ import { Markdown } from "@tiptap/markdown";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
-import { Extension, InputRule } from "@tiptap/core";
+import { Extension, InputRule, mergeAttributes } from "@tiptap/core";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   NodeSelection,
@@ -37,6 +37,9 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { toast } from "sonner";
+import type { EditorDialect, MarkdownCodec } from "../../connections/types";
+import { merge3 } from "../../connections/merge";
+import { replaceDocumentKeepingSelection } from "./replaceDocument";
 import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
 
 // Prepend https:// if no protocol is present
@@ -443,7 +446,7 @@ function FormatBar({
   );
 }
 
-// Data source for preview mode — bypasses NotesContext
+// Data source that bypasses NotesContext: preview windows and connection documents
 export interface PreviewModeData {
   content: string | null;
   title: string;
@@ -451,8 +454,18 @@ export interface PreviewModeData {
   modified: number;
   hasExternalChanges: boolean;
   reloadVersion: number;
-  save: (content: string) => Promise<void>;
+  save: (content: string, id?: string) => Promise<void>;
   reload: () => Promise<void>;
+  /** Markdown dialect of a connection. Fixed for the life of the editor. */
+  dialect?: EditorDialect;
+  /** Receives the markdown functions of the editor when it is ready. */
+  onCodec?: (codec: MarkdownCodec) => void;
+  /** Remote text to merge into the editor. A new `version` starts a merge. */
+  remoteUpdate?: { version: number; base: string; remote: string };
+  /** Uploads an image and returns the source to put in the document. */
+  uploadImage?: (file: Blob, name: string) => Promise<string>;
+  /** Opens a link. Returns false to use the default behavior. */
+  openLink?: (href: string) => boolean;
 }
 
 interface EditorProps {
@@ -543,10 +556,14 @@ export function Editor({
     : (notesCtx?.currentNote ?? null);
 
   const saveNote = previewMode
-    ? async (content: string, _noteId?: string) => {
-        await previewMode.save(content);
+    ? async (content: string, noteId?: string) => {
+        await previewMode.save(content, noteId);
       }
     : notesCtx!.saveNote;
+  const previewModeRef = useRef(previewMode);
+  previewModeRef.current = previewMode;
+  // The dialect decides the extension set, so it stays fixed for this editor.
+  const [dialect] = useState(previewMode?.dialect);
 
   const createNote = notesCtx?.createNote;
   const consumePendingNewNote = notesCtx?.consumePendingNewNote;
@@ -559,8 +576,8 @@ export function Editor({
   const reloadVersion = previewMode
     ? previewMode.reloadVersion
     : notesCtx!.reloadVersion;
-  const pinNote = notesCtx?.pinNote;
-  const unpinNote = notesCtx?.unpinNote;
+  const pinNote = previewMode ? undefined : notesCtx?.pinNote;
+  const unpinNote = previewMode ? undefined : notesCtx?.unpinNote;
   const notes = notesCtx?.notes;
   const { textDirection } = useTheme();
   const [isSaving, setIsSaving] = useState(false);
@@ -627,7 +644,10 @@ export function Editor({
       if (!editorInstance) return "";
       const manager = editorInstance.storage.markdown?.manager;
       if (manager) {
-        let markdown = manager.serialize(editorInstance.getJSON());
+        const json = editorInstance.getJSON();
+        let markdown = manager.serialize(
+          dialect ? dialect.prepareForSerialize(json) : json,
+        );
         // Clean up nbsp entities that TipTap inserts (especially in table cells)
         markdown = markdown.replace(/&nbsp;|&#160;/g, " ");
         return markdown;
@@ -635,7 +655,7 @@ export function Editor({
       // Fallback to plain text
       return editorInstance.getText();
     },
-    [],
+    [dialect],
   );
 
   // Load settings when note changes or notes are refreshed (e.g., after pin/unpin)
@@ -1073,6 +1093,7 @@ export function Editor({
           levels: [1, 2, 3, 4, 5, 6],
         },
         codeBlock: false,
+        ...dialect?.starterKit,
       }),
       CodeBlockLowlight.extend({
         addNodeView() {
@@ -1114,8 +1135,20 @@ export function Editor({
           ];
         },
       }),
-      Image.configure({
-        inline: false,
+      (dialect
+        ? Image.extend({
+            renderHTML({ HTMLAttributes }) {
+              return [
+                "img",
+                mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
+                  src: dialect.resolveImageSrc(HTMLAttributes.src ?? ""),
+                }),
+              ];
+            },
+          })
+        : Image
+      ).configure({
+        inline: dialect?.inlineImages ?? false,
         allowBase64: false,
       }),
       TaskList,
@@ -1131,7 +1164,7 @@ export function Editor({
         },
       }),
       Frontmatter,
-      Markdown.configure({}),
+      Markdown.configure(dialect ? { marked: dialect.marked } : {}),
       SearchHighlight.configure({
         matches: [],
         currentIndex: 0,
@@ -1150,6 +1183,7 @@ export function Editor({
           handleEditBlockMath(pos);
         },
       }),
+      ...(dialect?.extensions ?? []),
     ],
     editorProps: {
       attributes: {
@@ -1204,6 +1238,19 @@ export function Editor({
             const reader = new FileReader();
             reader.onload = async () => {
               const base64 = (reader.result as string).split(",")[1]; // Remove data:image/...;base64, prefix
+
+              const uploadImage = previewModeRef.current?.uploadImage;
+              if (uploadImage) {
+                try {
+                  const extension = blob.type.split("/")[1] || "png";
+                  const src = await uploadImage(blob, `pasted-image.${extension}`);
+                  editorRef.current?.chain().focus().setImage({ src }).run();
+                } catch (error) {
+                  console.error("Failed to upload image:", error);
+                  toast.error("Failed to upload image");
+                }
+                return;
+              }
 
               try {
                 // Save clipboard image
@@ -1305,6 +1352,53 @@ export function Editor({
   useEffect(() => {
     onEditorReady?.(editor);
   }, [editor, onEditorReady]);
+
+  // Give a connection the markdown functions of this editor
+  useEffect(() => {
+    const manager = editor?.storage.markdown?.manager;
+    if (!manager || !dialect) return;
+    previewModeRef.current?.onCodec?.({
+      parse: (markdown) => manager.parse(markdown),
+      serialize: (json) => manager.serialize(dialect.prepareForSerialize(json)),
+      lex: (markdown) => manager.instance.lexer(markdown),
+    });
+  }, [editor, dialect]);
+
+  // Merge remote changes into the editor and keep the cursor
+  const remoteUpdate = previewMode?.remoteUpdate;
+  const lastRemoteVersionRef = useRef(0);
+  useEffect(() => {
+    const manager = editor?.storage.markdown?.manager;
+    if (!editor || !manager || !remoteUpdate) return;
+    if (remoteUpdate.version === lastRemoteVersionRef.current) return;
+    lastRemoteVersionRef.current = remoteUpdate.version;
+
+    const normalize = (markdown: string) => {
+      const json = manager.parse(markdown);
+      return manager
+        .serialize(dialect ? dialect.prepareForSerialize(json) : json)
+        .replace(/&nbsp;|&#160;/g, " ");
+    };
+    const current = getMarkdown(editor);
+    const { text, conflict } = merge3(
+      normalize(remoteUpdate.base),
+      current,
+      normalize(remoteUpdate.remote),
+    );
+    if (text !== current) {
+      const json = manager.parse(text);
+      try {
+        replaceDocumentKeepingSelection(editor, json);
+      } catch {
+        editor.commands.setContent(json);
+      }
+    }
+    if (conflict) {
+      toast.warning(
+        "Someone changed the same text. Your version was kept. The other version is in the document history.",
+      );
+    }
+  }, [editor, remoteUpdate, dialect, getMarkdown]);
 
   // Sync notes list into editor storage for wikilink autocomplete
   useEffect(() => {
@@ -1440,6 +1534,13 @@ export function Editor({
       const link = target.closest("a");
       if (link) {
         e.preventDefault();
+        const openLink = previewModeRef.current?.openLink;
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          openLink?.(link.getAttribute("href") ?? "")
+        ) {
+          return;
+        }
         if ((e.metaKey || e.ctrlKey) && link.href) {
           // Use raw href attribute and normalize to handle protocol-less URLs
           const rawHref = link.getAttribute("href") ?? "";
@@ -1784,6 +1885,19 @@ export function Editor({
         },
       ],
     });
+    const uploadImage = previewModeRef.current?.uploadImage;
+    if (selected && uploadImage) {
+      try {
+        const path = selected as string;
+        const blob = await (await fetch(convertFileSrc(path))).blob();
+        const src = await uploadImage(blob, path.split(/[\\/]/).pop() ?? "image");
+        editor.chain().focus().setImage({ src }).run();
+      } catch (error) {
+        console.error("Failed to upload image:", error);
+        toast.error("Failed to upload image");
+      }
+      return;
+    }
     if (selected) {
       try {
         // Copy image to assets folder and get relative path (assets/filename.ext)

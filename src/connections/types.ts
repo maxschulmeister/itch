@@ -24,6 +24,8 @@ export interface RemoteDocument {
   /** Markdown body, without the title. */
   text: string;
   revision: number;
+  /** Last change, in seconds since 1970. */
+  updatedAt: number;
   spaceId: string;
   parentId: string | null;
   url: string;

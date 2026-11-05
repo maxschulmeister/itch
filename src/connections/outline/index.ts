@@ -15,6 +15,7 @@ interface OutlineDocument {
   title: string;
   text?: string;
   revision: number;
+  updatedAt: string;
   collectionId: string;
   parentDocumentId: string | null;
   url: string;
@@ -53,6 +54,7 @@ const toRemote = (doc: OutlineDocument): RemoteDocument => ({
   title: doc.title,
   text: doc.text ?? "",
   revision: doc.revision,
+  updatedAt: Math.floor(Date.parse(doc.updatedAt) / 1000),
   spaceId: doc.collectionId,
   parentId: doc.parentDocumentId ?? null,
   url: doc.url,

@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { NotesProvider, useNotes } from "./context/NotesContext";
+import { ConnectionsProvider, useConnections } from "./connections/ConnectionsContext";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import { listen } from "@tauri-apps/api/event";
 import { GitProvider } from "./context/GitContext";
@@ -51,6 +52,7 @@ function AppContent() {
     currentNote,
     syncNotesFolder,
   } = useNotes();
+  const { active: activeConnectionDocument, externalDocument } = useConnections();
   const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
   const interfaceZoomRef = useRef(interfaceZoom);
   interfaceZoomRef.current = interfaceZoom;
@@ -407,6 +409,8 @@ function AppContent() {
               {sidebarVisible && !focusMode && <SidebarResizeHandle />}
             </div>
             <Editor
+              key={activeConnectionDocument ? `connection:${activeConnectionDocument.connId}` : "local"}
+              previewMode={externalDocument ?? undefined}
               onToggleSidebar={toggleSidebar}
               sidebarVisible={sidebarVisible}
               focusMode={focusMode}
@@ -490,9 +494,11 @@ function App() {
       <Toaster />
       <TooltipProvider>
         <NotesProvider>
-          <GitProvider>
-            <AppContent />
-          </GitProvider>
+          <ConnectionsProvider>
+            <GitProvider>
+              <AppContent />
+            </GitProvider>
+          </ConnectionsProvider>
         </NotesProvider>
       </TooltipProvider>
     </ThemeProvider>

@@ -32,6 +32,8 @@ interface NotesDataContextValue {
 // Actions context: stable references, rarely causes re-renders
 interface NotesActionsContextValue {
   selectNote: (id: string) => Promise<void>;
+  /** Deselect the current note, for example when a connection document opens. */
+  clearSelection: () => void;
   createNote: () => Promise<void>;
   consumePendingNewNote: (id: string) => boolean;
   saveNote: (content: string, noteId?: string) => Promise<void>;
@@ -113,6 +115,12 @@ export function NotesProvider({ children }: { children: ReactNode }) {
       refreshNotes();
     }, 300);
   }, [refreshNotes]);
+
+  const clearSelection = useCallback(() => {
+    ++selectRequestIdRef.current;
+    setSelectedNoteId(null);
+    setCurrentNote(null);
+  }, []);
 
   const selectNote = useCallback(async (id: string) => {
     const requestId = ++selectRequestIdRef.current;
@@ -755,6 +763,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   const actionsValue = useMemo<NotesActionsContextValue>(
     () => ({
       selectNote,
+      clearSelection,
       createNote,
       consumePendingNewNote,
       saveNote,
@@ -779,6 +788,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     }),
     [
       selectNote,
+      clearSelection,
       createNote,
       consumePendingNewNote,
       saveNote,
