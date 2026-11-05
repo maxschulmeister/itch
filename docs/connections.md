@@ -32,6 +32,12 @@ To add a connector, add a folder `src/connections/<kind>/` that implements `Conn
 - Tokens: OS keychain (`keyring`), service `itch-connection`, account = connection id. Debug builds use `{APP_DATA}/dev-secrets.json`, because macOS asks for keychain access after each rebuild.
 - Images: `itch-conn://` protocol. Rust downloads the image with the token and caches it in `{APP_CACHE}/connections/<id>/`.
 
+### Windows
+
+- The main window is the library: the notes folder, the connections, or both. Without a folder, the sidebar shows only the connections, and local-note actions (New Note, New Folder) are not available.
+- The start screen offers **Connect…** next to **Open File…** and **Open Folder…**. It asks for the connector only when there is more than one.
+- A markdown file always opens in its own file window, without a sidebar. The main window hides then only when there is no library.
+
 ## Outline
 
 ### API use

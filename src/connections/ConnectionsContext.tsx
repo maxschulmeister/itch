@@ -70,6 +70,8 @@ export interface ConnectionSearchResult {
 
 interface ConnectionsContextValue {
   connections: ConnectionInfo[];
+  /** True after the first load of the connection list. */
+  loaded: boolean;
   /** Spaces for each connection id. */
   spaces: Record<string, TreeNode[]>;
   /** Document trees for each space key. */
@@ -122,6 +124,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const { clearSelection } = useNotesActions();
 
   const [connections, setConnections] = useState<ConnectionInfo[]>([]);
+  const [loaded, setLoaded] = useState(false);
   const [spaces, setSpaces] = useState<Record<string, TreeNode[]>>({});
   const [documents, setDocuments] = useState<Record<string, TreeNode[]>>({});
   const [expanded, setExpanded] = useState<Set<string>>(loadExpanded);
@@ -246,7 +249,9 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   }, []);
 
   useEffect(() => {
-    reloadConnections().catch((error) => console.error("Failed to load connections:", error));
+    reloadConnections()
+      .catch((error) => console.error("Failed to load connections:", error))
+      .finally(() => setLoaded(true));
   }, [reloadConnections]);
 
   // Load open trees when connections load, and then from time to time
@@ -931,6 +936,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
   const value = useMemo<ConnectionsContextValue>(
     () => ({
       connections,
+      loaded,
       spaces,
       documents,
       expanded,
@@ -951,6 +957,7 @@ export function ConnectionsProvider({ children }: { children: ReactNode }) {
     }),
     [
       connections,
+      loaded,
       spaces,
       documents,
       expanded,

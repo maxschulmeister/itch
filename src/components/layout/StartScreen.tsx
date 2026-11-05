@@ -3,7 +3,10 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { toast } from "sonner";
 import { useNotes } from "../../context/NotesContext";
 import { useTheme } from "../../context/ThemeContext";
-import { Button } from "../ui";
+import { connectors } from "../../connections/registry";
+import type { Connector } from "../../connections/types";
+import { AddConnectionForm } from "../settings/ConnectionsSettingsSection";
+import { AlertDialog, AlertDialogContent, AlertDialogTitle, Button } from "../ui";
 import { NoteIcon } from "../icons";
 import { isWindows, mod, shortcut } from "../../lib/platform";
 import * as filesService from "../../services/files";
@@ -22,6 +25,13 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
   const { setNotesFolder } = useNotes();
   const { reloadSettings } = useTheme();
   const [recentFiles, setRecentFiles] = useState<string[]>([]);
+  // Open "Connect" dialog; it asks for the kind only when there is more than one
+  const [connecting, setConnecting] = useState(false);
+  const [connector, setConnector] = useState<Connector | null>(null);
+  const openConnect = () => {
+    setConnector(connectors.length === 1 ? connectors[0] : null);
+    setConnecting(true);
+  };
 
   const loadRecentFiles = useCallback(() => {
     filesService
@@ -81,14 +91,14 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
       {!isWindows && <div className="h-10 shrink-0" data-tauri-drag-region />}
 
       <div className="flex-1 min-h-0 overflow-auto flex">
-        <div className="m-auto w-full max-w-md p-8 select-none">
+        <div className="m-auto w-full max-w-lg p-8 select-none">
           <div className="text-center animate-fade-in-up">
             <h1 className="text-3xl text-text font-serif mb-2 tracking-[-0.01em]">
               Welcome to Itch
             </h1>
             <p className="text-text-muted mb-6">
-              Open a markdown file to edit it, or open a folder to keep your
-              notes together in a library.
+              Open a markdown file to edit it, open a folder to keep your notes
+              together in a library, or connect an online workspace.
             </p>
           </div>
 
@@ -106,7 +116,33 @@ export function StartScreen({ onOpenSettings }: StartScreenProps) {
             <Button onClick={handleOpenFolder} variant="outline" size="xl">
               Open Folder…
             </Button>
+            <Button onClick={openConnect} variant="outline" size="xl">
+              Connect…
+            </Button>
           </div>
+
+          <AlertDialog open={connecting} onOpenChange={setConnecting}>
+            <AlertDialogContent aria-describedby={undefined}>
+              <AlertDialogTitle>
+                {connector ? `Connect ${connector.label}` : "Connect a Workspace"}
+              </AlertDialogTitle>
+              {connector ? (
+                <AddConnectionForm
+                  connector={connector}
+                  onDone={() => setConnecting(false)}
+                  className="space-y-3"
+                />
+              ) : (
+                <div className="flex flex-wrap gap-2">
+                  {connectors.map((item) => (
+                    <Button key={item.kind} variant="outline" size="md" onClick={() => setConnector(item)}>
+                      {item.label}
+                    </Button>
+                  ))}
+                </div>
+              )}
+            </AlertDialogContent>
+          </AlertDialog>
 
           {recentFiles.length > 0 && (
             <section

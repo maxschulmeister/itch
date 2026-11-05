@@ -3101,7 +3101,8 @@ fn remember_recent_file(app: &AppHandle, canonical_path: &Path) {
 
 /// Open a markdown file: select it when it is a note in the library, else open it in a
 /// file window. Returns true when a file window was opened.
-/// Without a library, the main window only shows the start screen, so it is hidden.
+/// Without a library (no notes folder and no connection), the main window only shows the
+/// start screen, so it is hidden.
 fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
     if try_select_in_notes_folder(app, path) {
         return Ok(false);
@@ -3119,7 +3120,8 @@ fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
         .read()
         .expect("app_config read lock")
         .notes_folder
-        .is_some();
+        .is_some()
+        || connections::has_connections(app);
     if !has_library {
         if let Some(main_window) = app.get_webview_window("main") {
             let _ = main_window.hide();

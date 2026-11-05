@@ -6,7 +6,15 @@ import type { Connector } from "../../connections/types";
 import { Button, Input } from "../ui";
 import { CloudCheckIcon, SpinnerIcon } from "../icons";
 
-function AddConnectionForm({ connector, onDone }: { connector: Connector; onDone: () => void }) {
+export function AddConnectionForm({
+  connector,
+  onDone,
+  className = "space-y-3 p-3 rounded-[10px] border border-border",
+}: {
+  connector: Connector;
+  onDone: () => void;
+  className?: string;
+}) {
   const { addConnection } = useConnections();
   const [baseUrl, setBaseUrl] = useState(connector.defaultBaseUrl);
   const [token, setToken] = useState("");
@@ -29,7 +37,7 @@ function AddConnectionForm({ connector, onDone }: { connector: Connector; onDone
   };
 
   return (
-    <form onSubmit={submit} className="space-y-3 p-3 rounded-[10px] border border-border">
+    <form onSubmit={submit} className={className}>
       <label className="block space-y-1">
         <span className="text-sm font-medium">Server URL</span>
         <Input value={baseUrl} onChange={(e) => setBaseUrl(e.target.value)} autoComplete="off" />

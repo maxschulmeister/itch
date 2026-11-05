@@ -162,6 +162,8 @@ export function NotesProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const createNote = useCallback(async () => {
+    // Only connections are open: there is no folder for a note
+    if (!notesFolder) return;
     try {
       // Derive target folder from the selected note's parent path
       let targetFolder: string | undefined;
@@ -188,7 +190,7 @@ export function NotesProvider({ children }: { children: ReactNode }) {
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create note");
     }
-  }, [refreshNotes]);
+  }, [refreshNotes, notesFolder]);
 
   const consumePendingNewNote = useCallback((id: string) => {
     if (pendingNewNoteIdRef.current !== id) {

@@ -2431,7 +2431,7 @@ export function Editor({
             <p className="text-sm">
               Pick up where you left off, or start something new
             </p>
-            {createNote && (
+            {createNote && notesCtx?.notesFolder && (
               <Button
                 onClick={createNote}
                 variant="secondary"

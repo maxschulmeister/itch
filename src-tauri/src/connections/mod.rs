@@ -70,6 +70,11 @@ fn save_configs(app: &AppHandle, configs: &[ConnectionConfig]) -> Result<(), Str
     std::fs::write(config_path(app)?, text).map_err(|e| e.to_string())
 }
 
+/// True when a connection exists. The main window then shows the connections as a library.
+pub fn has_connections(app: &AppHandle) -> bool {
+    load_configs(app).is_ok_and(|configs| !configs.is_empty())
+}
+
 fn find_config(app: &AppHandle, id: &str) -> Result<ConnectionConfig, String> {
     load_configs(app)?
         .into_iter()

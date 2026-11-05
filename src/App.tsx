@@ -52,7 +52,12 @@ function AppContent() {
     currentNote,
     syncNotesFolder,
   } = useNotes();
-  const { active: activeConnectionDocument, externalDocument } = useConnections();
+  const {
+    active: activeConnectionDocument,
+    externalDocument,
+    connections,
+    loaded: connectionsLoaded,
+  } = useConnections();
   const { interfaceZoom, setInterfaceZoom, reloadSettings } = useTheme();
   const interfaceZoomRef = useRef(interfaceZoom);
   interfaceZoomRef.current = interfaceZoom;
@@ -374,7 +379,7 @@ function AppContent() {
     editorRef.current?.commands.focus();
   }, []);
 
-  if (isLoading) {
+  if (isLoading || !connectionsLoaded) {
     return (
       <div className="h-full min-h-0 flex items-center justify-center bg-bg-secondary">
         <div className="text-text-muted/70 text-sm flex items-center gap-1.5 font-medium">
@@ -385,7 +390,8 @@ function AppContent() {
     );
   }
 
-  if (!notesFolder) {
+  // The library is the notes folder, the connections, or both
+  if (!notesFolder && connections.length === 0) {
     return view === "settings" ? (
       <SettingsPage onBack={closeSettings} />
     ) : (

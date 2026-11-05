@@ -445,7 +445,10 @@ export function CommandPalette({
       },
     );
 
-    return baseCommands;
+    // Only connections are open: there is no folder for notes
+    return notesFolder
+      ? baseCommands
+      : baseCommands.filter((command) => command.id !== "new-note" && command.id !== "new-folder");
   }, [
     createNote,
     currentNote,
