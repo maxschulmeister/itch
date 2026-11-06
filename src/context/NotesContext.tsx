@@ -33,6 +33,8 @@ interface NotesDataContextValue {
 // Actions context: stable references, rarely causes re-renders
 interface NotesActionsContextValue {
   selectNote: (id: string) => Promise<void>;
+  /** Deselect the current note, for example when a connection document opens. */
+  clearSelection: () => void;
   createNote: () => Promise<void>;
   consumePendingNewNote: (id: string) => boolean;
   saveNote: (content: string, noteId?: string) => Promise<void>;
@@ -147,6 +149,12 @@ export function NotesProvider({
     }, 300);
   }, [refreshNotes]);
 
+  const clearSelection = useCallback(() => {
+    ++selectRequestIdRef.current;
+    setSelectedNoteId(null);
+    setCurrentNote(null);
+  }, []);
+
   const selectNote = useCallback(async (id: string) => {
     const requestId = ++selectRequestIdRef.current;
     try {
@@ -187,6 +195,8 @@ export function NotesProvider({
   }, []);
 
   const createNote = useCallback(async () => {
+    // Only connections are open: there is no folder for a note
+    if (!notesFolder) return;
     try {
       // Derive target folder from the selected note's parent path
       let targetFolder: string | undefined;
@@ -213,7 +223,7 @@ export function NotesProvider({
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to create note");
     }
-  }, [refreshNotes]);
+  }, [refreshNotes, notesFolder]);
 
   const consumePendingNewNote = useCallback((id: string) => {
     if (pendingNewNoteIdRef.current !== id) {
@@ -836,6 +846,7 @@ export function NotesProvider({
   const actionsValue = useMemo<NotesActionsContextValue>(
     () => ({
       selectNote,
+      clearSelection,
       createNote,
       consumePendingNewNote,
       saveNote,
@@ -859,6 +870,7 @@ export function NotesProvider({
     }),
     [
       selectNote,
+      clearSelection,
       createNote,
       consumePendingNewNote,
       saveNote,

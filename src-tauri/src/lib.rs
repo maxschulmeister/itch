@@ -17,6 +17,7 @@ use tauri_plugin_clipboard_manager::ClipboardExt;
 use tokio::fs;
 use tokio::io::AsyncWriteExt;
 
+mod connections;
 mod git;
 mod ai;
 mod storage;
@@ -3181,7 +3182,8 @@ fn remember_recent_file(app: &AppHandle, canonical_path: &Path) {
 
 /// Open a markdown file: select it when it is a note in the library, else open it in a
 /// file window. Returns true when a file window was opened.
-/// Without a library, the main window only shows the start screen, so it is hidden.
+/// Without a library (no notes folder and no connection), the main window only shows the
+/// start screen, so it is hidden.
 fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
     if try_select_in_notes_folder(app, path) {
         return Ok(false);
@@ -3196,7 +3198,7 @@ fn open_markdown_file(app: &AppHandle, path: &Path) -> Result<bool, String> {
     Ok(true)
 }
 
-fn has_library(app: &AppHandle) -> bool {
+fn has_notes_folder(app: &AppHandle) -> bool {
     app.state::<AppState>()
         .app_config
         .read()
@@ -3205,8 +3207,13 @@ fn has_library(app: &AppHandle) -> bool {
         .is_some()
 }
 
-/// Without a library, the main window only shows the start screen: hide it when a file
-/// window opens.
+/// The main window shows a library: the notes folder, the connections, or both.
+fn has_library(app: &AppHandle) -> bool {
+    has_notes_folder(app) || connections::has_connections(app)
+}
+
+/// Without a library (no notes folder and no connection), the main window only shows the
+/// start screen: hide it when a file window opens.
 fn hide_start_screen(app: &AppHandle) {
     if !has_library(app) {
         if let Some(main_window) = app.get_webview_window("main") {
@@ -3433,8 +3440,8 @@ fn handle_menu_event(app: &AppHandle, id: &str) {
         .find(|window| window.is_focused().unwrap_or(false));
     match id {
         "new-file" => {
-            // In the library, a new file is a new note, like Cmd+N
-            if focused.is_some_and(|w| w.label() == "main") && has_library(app) {
+            // With a notes folder, a new file is a new note, like Cmd+N
+            if focused.is_some_and(|w| w.label() == "main") && has_notes_folder(app) {
                 let _ = app.emit_to("main", "new-note", ());
             } else if let Err(e) = open_untitled_file(app) {
                 eprintln!("Failed to create file: {}", e);
@@ -3573,6 +3580,10 @@ pub fn run() {
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .register_asynchronous_uri_scheme_protocol(
+            connections::ASSET_PROTOCOL,
+            connections::handle_asset_request,
+        )
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_menu(app_menu(app.handle())?)?;
@@ -3762,6 +3773,12 @@ pub fn run() {
             uninstall_cli,
             get_cli_status,
             set_title_bar_theme,
+            connections::connections_list,
+            connections::connections_add,
+            connections::connections_rename,
+            connections::connections_remove,
+            connections::connection_request,
+            connections::connection_upload,
         ])
         .build(tauri::generate_context!())
         .expect("error while building tauri application");

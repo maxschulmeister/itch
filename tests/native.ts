@@ -169,6 +169,9 @@ export class Native {
       case "get_recent_files":
         // No recent files: the start screen shows its empty state.
         return [];
+      case "connections_list":
+        // No connections: the library is the notes folder only.
+        return [];
       case "get_default_ignored_patterns":
         return ["node_modules", ".git"];
       case "plugin:dialog|save":

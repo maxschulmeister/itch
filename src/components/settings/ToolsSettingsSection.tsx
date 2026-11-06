@@ -1,4 +1,5 @@
 import { useState, useEffect, useReducer, useCallback } from "react";
+import { ConnectionsSettingsSection } from "./ConnectionsSettingsSection";
 import { invoke } from "@tauri-apps/api/core";
 import { toast } from "sonner";
 import { Button, Input, Select } from "../ui";
@@ -325,6 +326,10 @@ export function ToolsSettingsSection() {
 
   return (
     <div className="space-y-8 py-8">
+      <ConnectionsSettingsSection />
+
+      <div className="border-t border-border border-dashed" />
+
       {/* Inline AI */}
       <section className="pb-2">
         <h2 className="text-xl font-medium mb-0.5">Ask AI</h2>

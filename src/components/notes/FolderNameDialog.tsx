@@ -18,6 +18,7 @@ interface FolderNameDialogProps {
   title?: string;
   description?: string;
   confirmLabel?: string;
+  placeholder?: string;
   defaultValue?: string;
 }
 
@@ -28,6 +29,7 @@ export function FolderNameDialog({
   title = "Create New Folder",
   description = "Enter a name for your new folder",
   confirmLabel = "Create",
+  placeholder = "Folder name",
   defaultValue = "",
 }: FolderNameDialogProps) {
   const [name, setName] = useState(defaultValue);
@@ -73,7 +75,7 @@ export function FolderNameDialog({
           value={name}
           onChange={(e) => setName(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Folder name"
+          placeholder={placeholder}
           className="mt-1"
         />
         <AlertDialogFooter>

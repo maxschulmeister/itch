@@ -15,6 +15,7 @@ import {
 import StarterKit from "@tiptap/starter-kit";
 import Placeholder from "@tiptap/extension-placeholder";
 import Link from "@tiptap/extension-link";
+import Image from "@tiptap/extension-image";
 import { LocalImage } from "./LocalImage";
 import TaskList from "@tiptap/extension-task-list";
 import TaskItem from "@tiptap/extension-task-item";
@@ -23,7 +24,7 @@ import { Markdown } from "@tiptap/markdown";
 import CodeBlockLowlight from "@tiptap/extension-code-block-lowlight";
 import { lowlight } from "./lowlight";
 import { CodeBlockView } from "./CodeBlockView";
-import { Extension, InputRule } from "@tiptap/core";
+import { Extension, InputRule, mergeAttributes } from "@tiptap/core";
 import { Decoration, DecorationSet } from "@tiptap/pm/view";
 import {
   NodeSelection,
@@ -37,6 +38,10 @@ import { openUrl } from "@tauri-apps/plugin-opener";
 import { invoke, convertFileSrc } from "@tauri-apps/api/core";
 import { join } from "@tauri-apps/api/path";
 import { toast } from "sonner";
+import type { EditorDialect, MarkdownCodec } from "../../connections/types";
+import { merge3 } from "../../connections/merge";
+import { CONFLICT_MESSAGE } from "../../connections/editorMarkdown";
+import { replaceDocumentKeepingSelection } from "./replaceDocument";
 import { mod, alt, shift, isMac, isWindows } from "../../lib/platform";
 
 // Prepend https:// if no protocol is present
@@ -444,7 +449,10 @@ function FormatBar({
   );
 }
 
-// Data source for preview mode — bypasses NotesContext
+const IMAGE_DOCUMENT_CHANGED =
+  "The image was not added, because another document opened during the upload.";
+
+// Data source that bypasses NotesContext: preview windows and connection documents
 export interface PreviewModeData {
   content: string | null;
   title: string;
@@ -452,9 +460,26 @@ export interface PreviewModeData {
   modified: number;
   hasExternalChanges: boolean;
   reloadVersion: number;
-  save: (content: string) => Promise<void>;
+  save: (content: string, id?: string) => Promise<void>;
   reload: () => Promise<void>;
+  /** Gives the source a function that saves the edits waiting for the auto-save delay. */
   registerSaveFlush: (flush: () => Promise<void>) => () => void;
+  /** Markdown dialect of a connection. Fixed for the life of the editor. */
+  dialect?: EditorDialect;
+  /** Receives the markdown functions of the editor when it is ready. */
+  onCodec?: (codec: MarkdownCodec) => void;
+  /** Remote text to merge into the editor. A new `version` starts a merge. */
+  remoteUpdate?: { version: number; base: string; remote: string };
+  /** Called after the editor merged `remoteUpdate` into its text. */
+  onRemoteApplied?: (version: number) => void;
+  /** Called when the editor mounts; the returned function when it unmounts. */
+  attach?: () => () => void;
+  /** True while the source still writes this document (for the save indicator). */
+  saving?: boolean;
+  /** Uploads an image and returns the source to put in the document. */
+  uploadImage?: (file: Blob, name: string) => Promise<string>;
+  /** Opens a link. Returns false to use the default behavior. */
+  openLink?: (href: string) => boolean;
 }
 
 interface EditorProps {
@@ -547,10 +572,14 @@ export function Editor({
     : (notesCtx?.currentNote ?? null);
 
   const saveNote = previewMode
-    ? async (content: string, _noteId?: string) => {
-        await previewMode.save(content);
+    ? async (content: string, noteId?: string) => {
+        await previewMode.save(content, noteId);
       }
     : notesCtx!.saveNote;
+  const previewModeRef = useRef(previewMode);
+  previewModeRef.current = previewMode;
+  // The dialect decides the extension set, so it stays fixed for this editor.
+  const [dialect] = useState(previewMode?.dialect);
 
   const createNote = notesCtx?.createNote;
   const consumePendingNewNote = notesCtx?.consumePendingNewNote;
@@ -563,8 +592,8 @@ export function Editor({
   const reloadVersion = previewMode
     ? previewMode.reloadVersion
     : notesCtx!.reloadVersion;
-  const pinNote = notesCtx?.pinNote;
-  const unpinNote = notesCtx?.unpinNote;
+  const pinNote = previewMode ? undefined : notesCtx?.pinNote;
+  const unpinNote = previewMode ? undefined : notesCtx?.unpinNote;
   const notes = notesCtx?.notes;
   const { textDirection } = useTheme();
   const [isSaving, setIsSaving] = useState(false);
@@ -635,7 +664,10 @@ export function Editor({
       if (!editorInstance) return "";
       const manager = editorInstance.storage.markdown?.manager;
       if (manager) {
-        let markdown = manager.serialize(editorInstance.getJSON());
+        const json = editorInstance.getJSON();
+        let markdown = manager.serialize(
+          dialect ? dialect.prepareForSerialize(json) : json,
+        );
         // Clean up nbsp entities that TipTap inserts (especially in table cells)
         markdown = markdown.replace(/&nbsp;|&#160;/g, " ");
         return markdown;
@@ -643,7 +675,7 @@ export function Editor({
       // Fallback to plain text
       return editorInstance.getText();
     },
-    [],
+    [dialect],
   );
 
   // Load settings when note changes or notes are refreshed (e.g., after pin/unpin)
@@ -1081,6 +1113,7 @@ export function Editor({
           levels: [1, 2, 3, 4, 5, 6],
         },
         codeBlock: false,
+        ...dialect?.starterKit,
       }),
       CodeBlockLowlight.extend({
         addNodeView() {
@@ -1122,11 +1155,27 @@ export function Editor({
           ];
         },
       }),
-      LocalImage.configure({
-        inline: false,
-        allowBase64: false,
-        getNoteDir: () => noteDirRef.current,
-      }),
+      // Connection documents resolve images with their dialect; local notes
+      // resolve paths relative to the note
+      dialect
+        ? Image.extend({
+            renderHTML({ HTMLAttributes }) {
+              return [
+                "img",
+                mergeAttributes(this.options.HTMLAttributes, HTMLAttributes, {
+                  src: dialect.resolveImageSrc(HTMLAttributes.src ?? ""),
+                }),
+              ];
+            },
+          }).configure({
+            inline: dialect.inlineImages ?? false,
+            allowBase64: false,
+          })
+        : LocalImage.configure({
+            inline: false,
+            allowBase64: false,
+            getNoteDir: () => noteDirRef.current,
+          }),
       TaskList,
       TaskItem.configure({
         nested: true,
@@ -1140,7 +1189,7 @@ export function Editor({
         },
       }),
       Frontmatter,
-      Markdown.configure({}),
+      Markdown.configure(dialect ? { marked: dialect.marked } : {}),
       SearchHighlight.configure({
         matches: [],
         currentIndex: 0,
@@ -1159,6 +1208,7 @@ export function Editor({
           handleEditBlockMath(pos);
         },
       }),
+      ...(dialect?.extensions ?? []),
     ],
     editorProps: {
       attributes: {
@@ -1213,6 +1263,24 @@ export function Editor({
             const reader = new FileReader();
             reader.onload = async () => {
               const base64 = (reader.result as string).split(",")[1]; // Remove data:image/...;base64, prefix
+
+              const uploadImage = previewModeRef.current?.uploadImage;
+              if (uploadImage) {
+                const noteId = loadedNoteIdRef.current;
+                try {
+                  const extension = blob.type.split("/")[1] || "png";
+                  const src = await uploadImage(blob, `pasted-image.${extension}`);
+                  if (loadedNoteIdRef.current !== noteId) {
+                    toast.error(IMAGE_DOCUMENT_CHANGED);
+                    return;
+                  }
+                  editorRef.current?.chain().focus().setImage({ src }).run();
+                } catch (error) {
+                  console.error("Failed to upload image:", error);
+                  toast.error("Failed to upload image");
+                }
+                return;
+              }
 
               try {
                 // Save clipboard image
@@ -1314,6 +1382,21 @@ export function Editor({
   useEffect(() => {
     onEditorReady?.(editor);
   }, [editor, onEditorReady]);
+
+  // Tell the document source that this editor shows its text
+  useEffect(() => previewModeRef.current?.attach?.(), []);
+
+  // Give a connection the markdown functions of this editor
+  useEffect(() => {
+    const manager = editor?.storage.markdown?.manager;
+    if (!manager || !dialect) return;
+    previewModeRef.current?.onCodec?.({
+      parse: (markdown) => manager.parse(markdown),
+      serialize: (json) => manager.serialize(dialect.prepareForSerialize(json)),
+      lex: (markdown) => manager.instance.lexer(markdown),
+    });
+  }, [editor, dialect]);
+
 
   // Sync notes list into editor storage for wikilink autocomplete
   useEffect(() => {
@@ -1449,6 +1532,13 @@ export function Editor({
       const link = target.closest("a");
       if (link) {
         e.preventDefault();
+        const openLink = previewModeRef.current?.openLink;
+        if (
+          (e.metaKey || e.ctrlKey) &&
+          openLink?.(link.getAttribute("href") ?? "")
+        ) {
+          return;
+        }
         if ((e.metaKey || e.ctrlKey) && link.href) {
           // Use raw href attribute and normalize to handle protocol-less URLs
           const rawHref = link.getAttribute("href") ?? "";
@@ -1511,6 +1601,14 @@ export function Editor({
       if (sourceTimeoutRef.current) {
         clearTimeout(sourceTimeoutRef.current);
         sourceTimeoutRef.current = null;
+      }
+      // Save source text that waits for the auto-save delay, to the note it belongs to
+      const source = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (source) {
+        saveNote(source.content, source.noteId).catch((error) =>
+          console.error("Failed to save note:", error),
+        );
       }
     }
     // Check if this is a manual reload (user clicked Refresh button or pressed Cmd+R)
@@ -1606,6 +1704,7 @@ export function Editor({
     currentNote,
     editor,
     flushPendingSave,
+    saveNote,
     reloadVersion,
     consumePendingNewNote,
   ]);
@@ -1795,6 +1894,24 @@ export function Editor({
         },
       ],
     });
+    const uploadImage = previewModeRef.current?.uploadImage;
+    if (selected && uploadImage) {
+      const noteId = loadedNoteIdRef.current;
+      try {
+        const path = selected as string;
+        const blob = await (await fetch(convertFileSrc(path))).blob();
+        const src = await uploadImage(blob, path.split(/[\\/]/).pop() ?? "image");
+        if (loadedNoteIdRef.current !== noteId) {
+          toast.error(IMAGE_DOCUMENT_CHANGED);
+          return;
+        }
+        editor.chain().focus().setImage({ src }).run();
+      } catch (error) {
+        console.error("Failed to upload image:", error);
+        toast.error("Failed to upload image");
+      }
+      return;
+    }
     if (selected) {
       try {
         // Copy image to assets folder and get relative path (assets/filename.ext)
@@ -2010,6 +2127,8 @@ export function Editor({
 
     if (!sourceMode) {
       // === Entering source mode (TipTap → textarea) ===
+      // Save waiting editor text now, so it cannot follow (and replace) newer source text
+      void flushPendingSave();
       const md = getMarkdown(editor);
 
       // Find which top-level block is at the viewport top
@@ -2074,6 +2193,20 @@ export function Editor({
 
       sourceModeTransitionRef.current = { topBlockIndex, cursorBlockIndex };
 
+      // Save waiting source text now, before the editor takes over
+      if (sourceTimeoutRef.current) {
+        clearTimeout(sourceTimeoutRef.current);
+        sourceTimeoutRef.current = null;
+      }
+      const pendingSource = pendingSourceRef.current;
+      pendingSourceRef.current = null;
+      if (pendingSource) {
+        // Record the save, so the rename check knows the note when its id changes
+        saveImmediately(pendingSource.noteId, pendingSource.content).catch((error) =>
+          console.error("Failed to save note:", error),
+        );
+      }
+
       // Parse and set content
       const manager = editor.storage.markdown?.manager;
       if (manager) {
@@ -2088,7 +2221,7 @@ export function Editor({
       }
       setSourceMode(false);
     }
-  }, [editor, sourceMode, sourceContent, getMarkdown]);
+  }, [editor, sourceMode, sourceContent, getMarkdown, flushPendingSave, saveImmediately]);
 
   // Restore focus and scroll position after source mode transitions.
   // useLayoutEffect runs synchronously after React commits DOM changes,
@@ -2198,6 +2331,47 @@ export function Editor({
     [currentNote, saveNote],
   );
 
+  // Merge remote changes into the text that is being edited (the editor or
+  // the source view) and keep the cursor. Then tell the source.
+  const remoteUpdate = previewMode?.remoteUpdate;
+  const lastRemoteVersionRef = useRef(0);
+  useEffect(() => {
+    const manager = editor?.storage.markdown?.manager;
+    if (!editor || !manager || !remoteUpdate) return;
+    if (remoteUpdate.version === lastRemoteVersionRef.current) return;
+    lastRemoteVersionRef.current = remoteUpdate.version;
+
+    const normalize = (markdown: string) => {
+      const json = manager.parse(markdown);
+      return manager
+        .serialize(dialect ? dialect.prepareForSerialize(json) : json)
+        .replace(/&nbsp;|&#160;/g, " ");
+    };
+    const current = sourceMode ? sourceContent : getMarkdown(editor);
+    const remote = normalize(remoteUpdate.remote);
+    const { text, conflict } = merge3(normalize(remoteUpdate.base), current, remote);
+    if (sourceMode) {
+      // Also saves when only the local text differs from the server
+      if (text !== current || text !== remote) handleSourceChange(text);
+    } else {
+      if (text !== current) {
+        const json = manager.parse(text);
+        try {
+          replaceDocumentKeepingSelection(editor, json);
+        } catch {
+          editor.commands.setContent(json);
+        }
+      }
+      // Local changes are not on the server yet. Save them, also when the
+      // editor text did not change (for example when the local words won).
+      if (text !== remote) scheduleSave();
+    }
+    previewModeRef.current?.onRemoteApplied?.(remoteUpdate.version);
+    if (conflict) toast.warning(CONFLICT_MESSAGE);
+    // sourceContent is read at merge time only; a new version starts a merge
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [editor, remoteUpdate, dialect, getMarkdown, scheduleSave, sourceMode, handleSourceChange]);
+
   if (!currentNote) {
     // Preview mode: show loading state (content not yet loaded)
     if (previewMode) {
@@ -2267,7 +2441,7 @@ export function Editor({
             <p className="text-sm">
               Pick up where you left off, or start something new
             </p>
-            {createNote && (
+            {createNote && notesCtx?.notesFolder && (
               <Button
                 onClick={createNote}
                 variant="secondary"
@@ -2332,7 +2506,7 @@ export function Editor({
                 <span>Refresh</span>
               </button>
             </Tooltip>
-          ) : isSaving ? (
+          ) : isSaving || previewMode?.saving ? (
             <Tooltip content="Saving...">
               <div className="h-7 w-7 flex items-center justify-center">
                 <SpinnerIcon className="w-4.5 h-4.5 text-text-muted/40 stroke-[1.5] animate-spin" />

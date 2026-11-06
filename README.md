@@ -67,7 +67,8 @@ npm run tauri build    # Production build
 
 ```bash
 npx playwright install chromium
-npm test
+npm test             # unit tests (Vitest)
+npm run test:e2e     # browser tests (Playwright)
 cargo test --manifest-path src-tauri/Cargo.toml --lib
 ```
 

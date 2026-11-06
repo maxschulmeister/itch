@@ -2,6 +2,7 @@ import { useCallback, useMemo, memo, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import * as ContextMenu from "@radix-ui/react-context-menu";
 import { useNotes } from "../../context/NotesContext";
+import { useConnections } from "../../connections/ConnectionsContext";
 import {
   ListItem,
   AlertDialog,
@@ -251,6 +252,7 @@ export function NoteList({
     searchQuery,
     searchResults,
   } = useNotes();
+  const { searchResults: connectionResults } = useConnections();
 
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false);
   const [noteToDelete, setNoteToDelete] = useState<string | null>(null);
@@ -342,6 +344,7 @@ export function NoteList({
   }
 
   if (isSearching && displayItems.length === 0) {
+    if (connectionResults.length > 0) return null;
     return (
       <div className="p-4 text-center text-sm text-text-muted select-none">
         No results found

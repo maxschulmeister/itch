@@ -13,6 +13,9 @@ import {
 } from "@dnd-kit/core";
 import { useNotes } from "../../context/NotesContext";
 import { NoteList } from "../notes/NoteList";
+import { ConnectionsTree, type ConnectionDragItem, type ConnectionDropTarget } from "../connections/ConnectionsTree";
+import { ConnectionSearchResults } from "../connections/ConnectionSearchResults";
+import { useConnections } from "../../connections/ConnectionsContext";
 import { Footer } from "./Footer";
 import { IconButton, Input } from "../ui";
 import {
@@ -35,6 +38,7 @@ interface SidebarProps {
 
 export function Sidebar({ onOpenSettings }: SidebarProps) {
   const {
+    notesFolder,
     createNote,
     createFolder,
     notes,
@@ -45,6 +49,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
     moveNote,
     moveFolder,
   } = useNotes();
+  const { moveDocument } = useConnections();
   const [searchOpen, setSearchOpen] = useState(false);
   const [inputValue, setInputValue] = useState(searchQuery);
   const [plusMenuOpen, setPlusMenuOpen] = useState(false);
@@ -67,7 +72,10 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
 
   const handleDragStart = useCallback((event: DragStartEvent) => {
     const data = event.active.data.current;
-    if (data?.type === "note") {
+    if (data?.type === "connection-doc") {
+      setDragLabel((data as ConnectionDragItem).title);
+      setDragCount(1);
+    } else if (data?.type === "note") {
       const noteId = data.id as string;
       const leaf = noteId.includes("/")
         ? noteId.substring(noteId.lastIndexOf("/") + 1)
@@ -102,6 +110,16 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       const activeData = active.data.current;
       const overData = over.data.current;
       if (!activeData || !overData) return;
+
+      // Connection documents move only inside their own connection
+      if (activeData.type === "connection-doc" || overData.type === "connection-target") {
+        const item = activeData as ConnectionDragItem;
+        const target = overData as ConnectionDropTarget;
+        if (item.type === "connection-doc" && target.type === "connection-target" && item.connId === target.connId) {
+          await moveDocument(item.connId, item.docId, { spaceId: target.spaceId, parentId: target.parentId });
+        }
+        return;
+      }
 
       const targetFolder = overData.path as string;
 
@@ -333,10 +351,14 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
       {!isWindows && <div className="h-11 shrink-0" data-tauri-drag-region></div>}
       <div className={`flex items-center justify-between pl-4 pr-3 pb-2 border-b border-border shrink-0${isWindows ? " pt-2" : ""}`}>
         <div className="flex items-center gap-1">
-          <div className="font-medium text-base">Notes</div>
-          <div className="text-text-muted font-medium text-2xs min-w-4.75 h-4.75 flex items-center justify-center px-1 bg-bg-muted rounded-sm mt-0.5 pt-px">
-            {notes.length}
-          </div>
+          {notesFolder && (
+            <>
+              <div className="font-medium text-base">Notes</div>
+              <div className="text-text-muted font-medium text-2xs min-w-4.75 h-4.75 flex items-center justify-center px-1 bg-bg-muted rounded-sm mt-0.5 pt-px">
+                {notes.length}
+              </div>
+            </>
+          )}
         </div>
         <div className="flex items-center gap-px">
           <IconButton
@@ -349,7 +371,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
               <SearchIcon className="w-4.25 h-4.25 stroke-[1.5]" />
             )}
           </IconButton>
-          {foldersEnabled ? (
+          {notesFolder && (foldersEnabled ? (
             <DropdownMenu.Root
               open={plusMenuOpen}
               onOpenChange={setPlusMenuOpen}
@@ -398,7 +420,7 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
             >
               <PlusIcon className="w-5.25 h-5.25 stroke-[1.4]" />
             </IconButton>
-          )}
+          ))}
         </div>
       </div>
       {/* Scrollable area with search and notes */}
@@ -429,13 +451,18 @@ export function Sidebar({ onOpenSettings }: SidebarProps) {
           </div>
         )}
 
+        {!searchQuery.trim() && <ConnectionsTree />}
+
         {/* Note list */}
-        <NoteList
-          multiSelectedNoteIds={multiSelectedNoteIds}
-          setMultiSelectedNoteIds={setMultiSelectedNoteIds}
-          lastClickedNoteId={lastClickedNoteId}
-          setLastClickedNoteId={setLastClickedNoteId}
-        />
+        {notesFolder && (
+          <NoteList
+            multiSelectedNoteIds={multiSelectedNoteIds}
+            setMultiSelectedNoteIds={setMultiSelectedNoteIds}
+            lastClickedNoteId={lastClickedNoteId}
+            setLastClickedNoteId={setLastClickedNoteId}
+          />
+        )}
+        <ConnectionSearchResults />
       </div>
 
       {/* Footer with git status, commit, and settings */}

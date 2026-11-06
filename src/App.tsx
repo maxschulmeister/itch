@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
 import { toast } from "sonner";
 import { NotesProvider, useNotes } from "./context/NotesContext";
+import { ConnectionsProvider, useConnections } from "./connections/ConnectionsContext";
 import { ThemeProvider, useTheme } from "./context/ThemeContext";
 import { GitProvider } from "./context/GitContext";
 import { TooltipProvider, Toaster } from "./components/ui";
@@ -53,6 +54,12 @@ function AppContent() {
     reloadCurrentNote,
     currentNote,
   } = useNotes();
+  const {
+    active: activeConnectionDocument,
+    externalDocument,
+    connections,
+    loaded: connectionsLoaded,
+  } = useConnections();
   const currentNoteRef = useRef(currentNote);
   currentNoteRef.current = currentNote;
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -314,7 +321,7 @@ function AppContent() {
     editorRef.current?.commands.focus();
   }, []);
 
-  if (isLoading) {
+  if (isLoading || !connectionsLoaded) {
     return (
       <div className="h-full min-h-0 flex items-center justify-center bg-bg-secondary">
         <div className="text-text-muted/70 text-sm flex items-center gap-1.5 font-medium">
@@ -325,7 +332,8 @@ function AppContent() {
     );
   }
 
-  if (!notesFolder) {
+  // The library is the notes folder, the connections, or both
+  if (!notesFolder && connections.length === 0) {
     return <StartScreen onOpenSettings={openSettingsWindow} />;
   }
 
@@ -341,6 +349,8 @@ function AppContent() {
           {sidebarVisible && !focusMode && <SidebarResizeHandle />}
         </div>
         <Editor
+          key={activeConnectionDocument ? `connection:${activeConnectionDocument.connId}` : "local"}
+          previewMode={externalDocument ?? undefined}
           onToggleSidebar={toggleSidebar}
           sidebarVisible={sidebarVisible}
           focusMode={focusMode}
@@ -452,9 +462,11 @@ function App() {
           />
         ) : (
           <NotesProvider settingsWindow={isSettings}>
-            <GitProvider background={!isSettings}>
-              {isSettings ? <SettingsPage /> : <AppContent />}
-            </GitProvider>
+            <ConnectionsProvider listOnly={isSettings}>
+              <GitProvider background={!isSettings}>
+                {isSettings ? <SettingsPage /> : <AppContent />}
+              </GitProvider>
+            </ConnectionsProvider>
           </NotesProvider>
         )}
       </TooltipProvider>

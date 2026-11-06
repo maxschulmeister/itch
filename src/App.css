@@ -1367,3 +1367,40 @@ table.not-prose th {
     pointer-events: auto;
   }
 }
+
+/* Outline connection blocks */
+.ProseMirror .outline-notice {
+  margin: 1em 0;
+  padding: 0.5em 1em;
+  border-left: 3px solid var(--color-text-muted);
+  border-radius: 6px;
+  background: var(--color-bg-muted);
+}
+.ProseMirror .outline-notice-warning {
+  border-left-color: #f59e0b;
+}
+.ProseMirror .outline-notice-tip,
+.ProseMirror .outline-notice-success {
+  border-left-color: #10b981;
+}
+.ProseMirror .outline-notice > :first-child,
+.ProseMirror .outline-toggle > :first-child {
+  margin-top: 0;
+}
+.ProseMirror .outline-notice > :last-child,
+.ProseMirror .outline-toggle > :last-child {
+  margin-bottom: 0;
+}
+.ProseMirror .outline-toggle {
+  margin: 1em 0;
+  padding-left: 1em;
+  border-left: 2px dashed var(--color-border);
+}
+.ProseMirror .outline-inline-math {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+}
+.ProseMirror mark {
+  background: var(--color-selection);
+  color: inherit;
+}
